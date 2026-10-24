@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'app/ripple_nav.dart';
 import 'app/state.dart';
 import 'app/theme.dart';
 import 'core/storage/app_database.dart';
@@ -41,55 +42,28 @@ class ProxyPilotApp extends StatelessWidget {
   }
 }
 
-class HomeShell extends ConsumerStatefulWidget {
+class HomeShell extends ConsumerWidget {
   const HomeShell({super.key});
-  @override
-  ConsumerState<HomeShell> createState() => _HomeShellState();
-}
 
-class _HomeShellState extends ConsumerState<HomeShell> {
-  int _index = 0;
+  static const destinations = [
+    NavDestinationSpec(Icons.speed_outlined, Icons.speed_rounded, '首页'),
+    NavDestinationSpec(Icons.dns_outlined, Icons.dns_rounded, '节点'),
+    NavDestinationSpec(Icons.troubleshoot_outlined, Icons.troubleshoot_rounded, '检测'),
+    NavDestinationSpec(Icons.settings_outlined, Icons.settings_rounded, '设置'),
+  ];
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     // 让 VPN 控制器尽早订阅原生事件
     ref.watch(vpnControllerProvider.select((s) => s.state));
-    const pages = [
-      DashboardPage(),
-      ProfilesPage(),
-      DiagnosticsPage(),
-      SettingsPage(),
-    ];
-    return Scaffold(
-      body: SafeArea(
-        child: IndexedStack(index: _index, children: pages),
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.speed_outlined),
-            selectedIcon: Icon(Icons.speed),
-            label: '首页',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.dns_outlined),
-            selectedIcon: Icon(Icons.dns),
-            label: '节点',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.troubleshoot_outlined),
-            selectedIcon: Icon(Icons.troubleshoot),
-            label: '检测',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: '设置',
-          ),
-        ],
-      ),
+    return RippleNavShell(
+      destinations: destinations,
+      pageBuilder: (i, active) => switch (i) {
+        0 => const DashboardPage(),
+        1 => ProfilesPage(active: active),
+        2 => const DiagnosticsPage(),
+        _ => const SettingsPage(),
+      },
     );
   }
 }

@@ -8,8 +8,8 @@ import '../../app/theme.dart';
 import '../../core/models/models.dart';
 import '../../core/security/redact.dart';
 
-/// 必须与 pubspec.yaml 的 version 一致（当前 1.0.0+1）
-const appVersion = '1.0.0';
+/// 必须与 pubspec.yaml 的 version 一致（当前 1.1.0+2）
+const appVersion = '1.1.0';
 const appBrandName = "WQ's Proxy VPN";
 
 class SettingsPage extends ConsumerWidget {
@@ -63,13 +63,7 @@ class SettingsPage extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(20, 20, 20, 4),
-          child: Text(
-            '设置',
-            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
-          ),
-        ),
+        const PageHeader('设置'),
         if (running)
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 20),
@@ -201,7 +195,12 @@ class SettingsPage extends ConsumerWidget {
             ],
           ),
         ),
-        const SectionTitle('API 配置'),
+        const SectionTitle(
+          'API 配置',
+          info: 'AbuseIPDB API Key 仅用于在“检测中心 → IP 信誉”查询当前出口 IP 的举报记录。\n'
+              '获取方式：在 abuseipdb.com 注册免费账号 → Account → API → 创建 Key。\n'
+              'Key 保存在系统安全存储（Android Keystore 加密），不写入普通数据库、日志或代码仓库。',
+        ),
         Card(
           child: Column(
             children: [
@@ -209,8 +208,8 @@ class SettingsPage extends ConsumerWidget {
                 title: const Text('AbuseIPDB API Key'),
                 subtitle: Text(
                   st.abuseIpDbKey.isEmpty
-                      ? '未配置（保存在安全存储，不会写入源码或日志）'
-                      : '已配置（${st.abuseIpDbKey.length} 位）',
+                      ? '未配置 · 用于查询出口 IP 信誉（可选）'
+                      : '已配置 · 保存在安全存储中',
                 ),
                 onTap: () async {
                   final v = await _edit(

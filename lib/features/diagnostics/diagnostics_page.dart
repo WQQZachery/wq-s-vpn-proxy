@@ -5,11 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/state.dart';
 import '../../app/theme.dart';
-import '../../core/engine/traffic_meter.dart';
 import '../../core/models/models.dart';
 import '../../core/networking/probes.dart';
-import '../../core/networking/speed_test.dart';
 import '../../core/reputation/ip_reputation.dart';
+import '../speedtest/speedtest_page.dart';
+import 'reputation_panel.dart';
 
 final _reputation = IpReputationService();
 
@@ -24,9 +24,8 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
   ExitIpInfo? _ip;
   String? _ipError;
   ReputationReport? _rep;
-  String? _repError;
+  ReputationException? _repError;
   List<ProbeResult> _history = [];
-  List<SpeedTestResult> _speed = [];
   final _customUrl = TextEditingController(
     text: 'https://www.google.com/generate_204',
   );
@@ -116,10 +115,7 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
   Future<void> _reputationCheck() => _run('rep', () async {
     final key = ref.read(settingsProvider).abuseIpDbKey;
     final ip = _ip?.ip;
-    if (ip == null) {
-      setState(() => _repError = '请先查询出口 IP');
-      return;
-    }
+    if (ip == null) return;
     final sw = Stopwatch()..start();
     try {
       final r = await _reputation.checkAbuseIpDb(ip, key);
@@ -142,7 +138,10 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
         ),
       );
     } on ReputationException catch (e) {
-      setState(() => _repError = '${e.kind.label}：${e.message}');
+      setState(() {
+        _rep = null;
+        _repError = e;
+      });
       await _save(
         ProbeResult(
           kind: 'reputation',
@@ -189,12 +188,23 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
     );
   });
 
-  Future<void> _speedTest() => _run('speed', () async {
-    final t = SpeedTester();
-    final d = await t.download();
-    final u = await t.upload();
-    setState(() => _speed = [d, u]);
-  });
+  /// 一键：先查出口 IP，成功且已配置 Key 时继续查信誉。
+  Future<void> _ipAndReputation() async {
+    await _exitIp();
+    if (!mounted || _ip == null) return;
+    if (ref.read(settingsProvider).abuseIpDbKey.isEmpty) {
+      setState(() {
+        _rep = null;
+        _repError = ReputationException(
+          ProbeErrorKind.apiUnavailable,
+          '未配置 AbuseIPDB API Key',
+          ReputationFailure.noKey,
+        );
+      });
+      return;
+    }
+    await _reputationCheck();
+  }
 
   Widget _btn(String key, String label, IconData icon, VoidCallback onTap) =>
       ActionChip(
@@ -212,206 +222,208 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
   @override
   Widget build(BuildContext context) {
     final vpn = ref.watch(vpnControllerProvider);
+    final hasKey = ref.watch(settingsProvider.select((s) => s.abuseIpDbKey.isNotEmpty));
+    final ipBusy = _running.contains('ip') || _running.contains('rep');
     return RefreshIndicator(
       onRefresh: _loadHistory,
       child: ListView(
-        padding: const EdgeInsets.only(bottom: 24),
+        padding: const EdgeInsets.only(bottom: Gaps.xl),
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(20, 20, 20, 4),
-            child: Text(
-              '检测中心',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+          PageHeader(
+            '检测中心',
+            subtitle: Text('当前检测路径：${probeMethodLabel(vpn)}'),
+            trailing: const InfoTip(
+              title: '这里的检测分别说明什么',
+              message: '• 主动测速：真实传输数据，测延迟、下载、上传速度。\n'
+                  '• 出口 IP 与 IP 信誉：别人看到的你的 IP，以及该 IP 在 AbuseIPDB 中被举报的情况。它与速度、节点延迟无关。\n'
+                  '• 节点延迟：在“节点”页，衡量连到各节点有多快。\n'
+                  '• 连通性检测：某个网站（如 Cloudflare、Claude）在网络层面能否到达。\n'
+                  '这些结果都不能单独判断“隐私是否安全”：隐私还取决于 DNS 设置、应用自身行为、节点运营方等。',
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Text(
-              '当前检测方式：${probeMethodLabel(vpn)}',
-              style: const TextStyle(color: Colors.white54, fontSize: 12),
+          AppCard(
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const SpeedTestPage()),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            child: Row(
               children: [
-                _btn('ip', '出口 IP', Icons.public, _exitIp),
-                _btn(
-                  'rep',
-                  'IP 信誉',
-                  Icons.verified_user_outlined,
-                  _reputationCheck,
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: kAccent.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(Radii.md),
+                  ),
+                  child: const Icon(Icons.speed_rounded, color: kAccent),
                 ),
-                _btn('cf', 'Cloudflare', Icons.cloud_outlined, _cloudflare),
-                _btn('claude', 'Claude', Icons.smart_toy_outlined, _claude),
-                _btn('speed', '主动测速', Icons.speed, _speedTest),
+                const SizedBox(width: 14),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('主动测速', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                      SizedBox(height: 2),
+                      Text(
+                        '自动选择测试服务器，测量延迟、抖动、下载与上传',
+                        style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded, color: AppColors.textTertiary),
               ],
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 20),
-            child: Text(
-              '隐私提示：出口 IP 查询会把你的出口 IP 发送给 api.ip.sb（失败时 ipinfo.io）；IP 信誉会发送给 AbuseIPDB；测速连接 speed.cloudflare.com。',
-              style: TextStyle(fontSize: 11, color: Colors.white38),
-            ),
+          const SectionTitle(
+            '出口 IP 与 IP 信誉',
+            info: '出口 IP：网站和服务看到的你的 IP 地址（VPN 开启时通常是节点的 IP）。数据来自 api.ip.sb（失败时 ipinfo.io），归属地由服务商估算，可能不精确。\n\n'
+                'IP 信誉：用 AbuseIPDB 查询这个出口 IP 过去 90 天被其他网站管理员举报的情况。它只反映“举报记录”，不是节点质量、速度或隐私安全性的评分。\n\n'
+                '隐私提示：查询会把你的出口 IP 发送给上述服务。',
           ),
-          const SectionTitle('出口 IP'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: _ip == null
-                  ? Text(
-                      _ipError ?? '尚未检测',
-                      style: TextStyle(
-                        color: _ipError != null ? kBad : Colors.white54,
-                      ),
-                    )
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _ip!.ip,
-                          style: const TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w600,
-                          ),
+          AppCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(Gaps.card, 14, 8, 6),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              '出口 IP',
+                              style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
+                            ),
+                            const SizedBox(height: 2),
+                            SwapSwitcher(
+                              identity: _ip?.ip ?? _ipError,
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                _ip?.ip ?? (_ipError != null ? '查询失败' : '尚未查询'),
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  color: _ip == null && _ipError != null ? kBad : null,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 6),
-                        _kv('ASN', _ip!.asn),
-                        _kv('网络', _ip!.org),
-                        _kv('ISP', _ip!.isp),
-                        _kv(
-                          '地区',
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: ipBusy ? null : _ipAndReputation,
+                        icon: ipBusy
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.refresh_rounded, size: 18),
+                        label: Text(_ip == null ? '查询' : '重新查询'),
+                      ),
+                    ],
+                  ),
+                ),
+                if (_ipError != null && _ip == null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(Gaps.card, 0, Gaps.card, 12),
+                    child: Text(_ipError!, style: const TextStyle(color: kBad, fontSize: 13)),
+                  ),
+                if (_ip != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(Gaps.card, 0, Gaps.card, 10),
+                    child: Column(
+                      children: [
+                        KvRow('网络 / ASN', [_ip!.org, _ip!.asn].whereType<String>().where((e) => e.isNotEmpty).join(' · ').ifEmpty('（服务未返回）')),
+                        KvRow(
+                          '归属地',
                           [_ip!.country, _ip!.region, _ip!.city]
                               .whereType<String>()
                               .where((e) => e.isNotEmpty)
-                              .join(' / '),
+                              .join(' / ')
+                              .ifEmpty('（服务未返回）'),
+                          info: '由 IP 库估算，可能与节点实际所在地不同。',
                         ),
-                        _kv('数据来源', '${_ip!.source}（服务商提供，可能不精确）'),
-                        _kv(
-                          '更新时间',
-                          _ip!.fetchedAt.toLocal().toString().substring(0, 19),
+                        KvRow(
+                          '数据来源',
+                          '${_ip!.source} · ${_ip!.fetchedAt.toLocal().toString().substring(11, 19)}',
                         ),
                       ],
-                    ),
-            ),
-          ),
-          const SectionTitle('IP 信誉（AbuseIPDB）'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: _rep == null
-                  ? Text(
-                      _repError ??
-                          (ref.watch(settingsProvider).abuseIpDbKey.isEmpty
-                              ? '未配置 API Key（设置 → API 配置）'
-                              : '尚未检测'),
-                      style: TextStyle(
-                        color: _repError != null ? kBad : Colors.white54,
-                      ),
-                    )
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '来源：${_rep!.provider} · ${_rep!.fetchedAt.toLocal().toString().substring(0, 19)}${_rep!.fromCache ? '（缓存）' : ''}',
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 12,
-                          ),
-                        ),
-                        for (final f in _rep!.fields)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 8),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '${f.key}：${f.value}',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                Text(
-                                  f.definition,
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.white38,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-            ),
-          ),
-          const SectionTitle('自定义 HTTPS 检测（DNS / TCP / TLS / HTTP）'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _customUrl,
-                      decoration: const InputDecoration(labelText: '目标 URL'),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  _btn('custom', '检测', Icons.play_arrow, _custom),
-                ],
-              ),
+                const Divider(),
+                ReputationPanel(
+                  ip: _ip?.ip,
+                  report: _rep,
+                  error: _repError,
+                  hasKey: hasKey,
+                  loading: _running.contains('rep'),
+                  onRetry: _ip == null || _running.contains('rep') ? null : _reputationCheck,
+                ),
+              ],
             ),
           ),
-          if (_speed.isNotEmpty) ...[
-            const SectionTitle('主动测速结果（非 VPN 实时流量）'),
-            Card(
-              child: Column(
-                children: [
-                  for (final s in _speed)
-                    ListTile(
-                      title: Text(
-                        '${s.direction}：${s.error == null ? formatBps(s.bps) : '失败'}',
-                      ),
-                      subtitle: Text(
-                        '服务器 ${s.server} · ${formatBytes(s.bytes)} / ${s.ms} ms${s.error != null ? '\n${s.error}' : ''}',
+          const SectionTitle(
+            '连通性检测',
+            info: '逐步执行 DNS / TCP / TLS / HTTP，判断目标在网络层面能否到达。只证明网络可达，不代表账户可用或网页一定能正常打开。',
+          ),
+          AppCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _btn('cf', 'Cloudflare', Icons.cloud_outlined, _cloudflare),
+                    _btn('claude', 'Claude', Icons.smart_toy_outlined, _claude),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _customUrl,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: '自定义 HTTPS 目标',
+                          prefixIcon: Icon(Icons.link_rounded, size: 18),
+                        ),
                       ),
                     ),
-                ],
-              ),
+                    const SizedBox(width: 8),
+                    _btn('custom', '检测', Icons.play_arrow_rounded, _custom),
+                  ],
+                ),
+              ],
             ),
-          ],
+          ),
           SectionTitle(
             '检测历史',
             trailing: TextButton(
-              onPressed: () async {
-                await ref.read(databaseProvider).clearProbes();
-                await _loadHistory();
-              },
+              onPressed: _history.isEmpty
+                  ? null
+                  : () async {
+                      await ref.read(databaseProvider).clearProbes();
+                      await _loadHistory();
+                    },
               child: const Text('清空'),
             ),
           ),
           if (_history.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(20),
-              child: Text('暂无记录', style: TextStyle(color: Colors.white38)),
+            const EmptyState(
+              icon: Icons.history_rounded,
+              title: '暂无记录',
+              message: '执行的每项检测都会保存在这里（含耗时、方式与错误原因）。',
             ),
           for (final r in _history) _historyTile(r),
         ],
       ),
     );
   }
-
-  Widget _kv(String k, String? v) => Padding(
-    padding: const EdgeInsets.only(top: 2),
-    child: Text(
-      '$k：${(v == null || v.isEmpty) ? '（服务未返回）' : v}',
-      style: const TextStyle(fontSize: 13),
-    ),
-  );
 
   Widget _historyTile(ProbeResult r) {
     final color = switch (r.status) {
@@ -426,6 +438,7 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
       'exit_ip': '出口 IP',
       'reputation': 'IP 信誉',
       'https': 'HTTPS',
+      'speedtest': '主动测速',
     };
     return Card(
       child: ExpansionTile(
@@ -468,4 +481,8 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
       ),
     );
   }
+}
+
+extension on String {
+  String ifEmpty(String fallback) => isEmpty ? fallback : this;
 }

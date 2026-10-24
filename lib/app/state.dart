@@ -9,6 +9,7 @@ import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/engine/config_builder.dart';
+import '../core/engine/latency_tester.dart';
 import '../core/engine/node_validator.dart';
 import '../core/engine/traffic_meter.dart';
 import '../core/engine/vpn_engine.dart';
@@ -88,9 +89,13 @@ class SettingsNotifier extends Notifier<SettingsState> {
   AppDatabase get _db => ref.read(databaseProvider);
 
   Future<void> _load() async {
-    final raw = await _db.getKv('engine');
-    final ret = int.tryParse(await _db.getKv('retentionDays') ?? '') ?? 30;
-    final key = await _db.getSecretSetting('abuseipdb') ?? '';
+    final db = _db; // 先取引用：await 之后 provider 可能已被释放
+    final raw = await db.getKv('engine');
+    final ret = int.tryParse(await db.getKv('retentionDays') ?? '') ?? 30;
+    final key = await db.getSecretSetting('abuseipdb') ?? '';
+    final cf = await db.getKv('cfTarget');
+    final claude = await db.getKv('claudeTarget');
+    if (!ref.mounted) return;
     state = SettingsState(
       engine: raw == null
           ? const EngineSettings()
@@ -99,10 +104,10 @@ class SettingsNotifier extends Notifier<SettingsState> {
             ),
       retentionDays: ret,
       abuseIpDbKey: key,
-      cloudflareTarget: await _db.getKv('cfTarget') ?? state.cloudflareTarget,
-      claudeTarget: await _db.getKv('claudeTarget') ?? state.claudeTarget,
+      cloudflareTarget: cf ?? state.cloudflareTarget,
+      claudeTarget: claude ?? state.claudeTarget,
     );
-    await _db.pruneProbes(Duration(days: ret));
+    await db.pruneProbes(Duration(days: ret));
   }
 
   Future<void> updateEngine(EngineSettings e) async {
@@ -145,14 +150,19 @@ class NodesState {
     this.subscriptions = const [],
     this.selectedId,
     this.loading = true,
-    this.testing = const {},
+    this.latency = const {},
   });
   final List<ProxyNode> nodes;
   final Map<String, NodeHealth> health;
   final List<Subscription> subscriptions;
   final String? selectedId;
   final bool loading;
-  final Set<String> testing;
+
+  /// 本次会话内的实时检测状态（与数据库中的历史结果 [health] 区分：后者显示为“上次”）。
+  final Map<String, LatencyEntry> latency;
+
+  Set<String> get testing =>
+      {for (final e in latency.entries) if (e.value.busy) e.key};
 
   ProxyNode? get selected {
     for (final n in nodes) {
@@ -167,7 +177,7 @@ class NodesState {
     List<Subscription>? subscriptions,
     String? selectedId,
     bool? loading,
-    Set<String>? testing,
+    Map<String, LatencyEntry>? latency,
     bool clearSelected = false,
   }) => NodesState(
     nodes: nodes ?? this.nodes,
@@ -175,7 +185,7 @@ class NodesState {
     subscriptions: subscriptions ?? this.subscriptions,
     selectedId: clearSelected ? null : (selectedId ?? this.selectedId),
     loading: loading ?? this.loading,
-    testing: testing ?? this.testing,
+    latency: latency ?? this.latency,
   );
 }
 
@@ -193,6 +203,13 @@ class ImportOutcome {
 }
 
 class NodesNotifier extends Notifier<NodesState> {
+  late final LatencyScheduler _latency = LatencyScheduler(
+    probe: _probeNode,
+    onChange: (m) {
+      if (ref.mounted) state = state.copyWith(latency: m);
+    },
+  );
+
   @override
   NodesState build() {
     unawaited(reload());
@@ -207,14 +224,17 @@ class NodesNotifier extends Notifier<NodesState> {
     final subs = await _db.listSubscriptions();
     final health = await _db.listHealth();
     var sel = await _db.getKv('selectedNode');
+    if (!ref.mounted) return;
     if (sel != null && !nodes.any((n) => n.id == sel)) sel = null;
     sel ??= nodes.where((n) => n.enabled).firstOrNull?.id;
+    _latency.retain({for (final n in nodes) n.id});
     state = NodesState(
       nodes: nodes,
       health: health,
       subscriptions: subs,
       selectedId: sel,
       loading: false,
+      latency: _latency.entries,
     );
   }
 
@@ -356,7 +376,7 @@ class NodesNotifier extends Notifier<NodesState> {
     _log('更新订阅「${s.name}」：${redactUrl(s.url)}');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
-      ..userAgent = 'WQsProxyVPN/1.0.0 (sing-box 1.14)';
+      ..userAgent = 'WQsProxyVPN/1.1.0 (sing-box 1.14)';
     try {
       final req = await client
           .getUrl(Uri.parse(s.url))
@@ -411,38 +431,96 @@ class NodesNotifier extends Notifier<NodesState> {
     }
   }
 
-  /// 节点健康检查：VPN 运行时经 sing-box 实际代理请求；否则仅测 TCP 端口（明确标注）。并发上限 4。
-  Future<void> testNodes(List<ProxyNode> nodes) async {
+  /// 进入节点页时自动检测已启用节点（冷却 30 秒、并发 4、2 分钟内的本次结果直接复用）。
+  void autoTest() {
+    if (state.loading) return;
+    _latency.autoRun([
+      for (final n in state.nodes)
+        if (n.enabled) n.id,
+    ]);
+  }
+
+  /// 手动检测 / 批量重新检测。
+  Future<void> testNodes(List<ProxyNode> nodes) {
+    _latency.enqueue([for (final n in nodes) n.id]);
+    return _latency.whenIdle();
+  }
+
+  void cancelTests() => _latency.cancel();
+  bool get testsRunning => _latency.running;
+  int get testsPending => _latency.pending;
+
+  /// VPN 连接或断开后检测层级改变，旧的本次结果作废。
+  void onNetworkChanged() => _latency.invalidate();
+
+  static const _udpProtocols = {ProxyProtocol.hysteria2, ProxyProtocol.tuic};
+
+  /// 单个节点的分层探测。VPN 运行中：经 sing-box 实际代理请求；否则 TCP（+TLS 握手）。
+  Future<ProbeOutcome> _probeNode(String id) async {
+    final n = state.nodes.where((x) => x.id == id).firstOrNull;
+    if (n == null) return const ProbeOutcome.unsupported('节点已删除');
     final vpn = ref.read(vpnControllerProvider);
-    state = state.copyWith(
-      testing: {...state.testing, ...nodes.map((n) => n.id)},
-    );
-    final probes = NetworkProbes(timeout: const Duration(seconds: 5));
-    await runLimited<ProxyNode, void>(nodes, 4, (n) async {
+    ProbeOutcome o;
+    if (vpn.state == VpnState.started) {
       final tag = vpn.nodeTags[n.id];
+      if (tag == null || vpn.clash == null) {
+        // VPN 开启时本应用流量也经隧道，直接 TCP 探测会被 TUN 本地应答，结果无意义，因此不做。
+        return const ProbeOutcome.unsupported('不在当前运行配置中，重新连接后可检测');
+      }
       try {
-        if (vpn.state == VpnState.started && tag != null && vpn.clash != null) {
-          final ms = await vpn.clash!.delay(tag);
-          await _db.recordHealth(n.id, latencyMs: ms, method: 'proxy');
-        } else {
-          final ms = await probes.tcpPing(n.server, n.port);
-          await _db.recordHealth(n.id, latencyMs: ms, method: 'tcp');
+        final ms = await vpn.clash!.delay(tag, timeoutMs: 5000);
+        o = ProbeOutcome.ok(ms, LatencyLayer.proxy);
+      } catch (e) {
+        o = classifyProbeError(redact(describeError(e)), LatencyLayer.proxy);
+      }
+    } else if (_udpProtocols.contains(n.protocol)) {
+      return ProbeOutcome.unsupported(
+        '${n.protocol.label} 基于 UDP/QUIC，无法用 TCP 探测；连接 VPN 后可经内核检测',
+      );
+    } else {
+      final probes = NetworkProbes(timeout: const Duration(seconds: 5));
+      try {
+        final ms = await probes.tcpPing(n.server, n.port);
+        o = ProbeOutcome.ok(ms, LatencyLayer.tcp);
+        final tlsCheckable = n.tls.enabled &&
+            !n.tls.isReality &&
+            (n.transport.type == 'tcp' ||
+                n.transport.type == 'ws' ||
+                n.transport.type == 'httpupgrade' ||
+                n.transport.type == 'http');
+        if (tlsCheckable) {
+          try {
+            await probes.tlsHandshake(
+              n.server,
+              n.port,
+              serverName: n.tls.serverName,
+            );
+            o = ProbeOutcome.ok(ms, LatencyLayer.tls);
+          } catch (e) {
+            o = ProbeOutcome.failed(
+              LatencyLayer.tls,
+              'TCP 可达（$ms ms），但 ${classifyProbeError(redact(describeError(e)), LatencyLayer.tls).error}',
+            );
+          }
         }
       } catch (e) {
-        await _db.recordHealth(
-          n.id,
-          error: '${classifyError(e).label}：${redact(describeError(e))}',
-          method: (vpn.state == VpnState.started && tag != null)
-              ? 'proxy'
-              : 'tcp',
-        );
+        o = classifyProbeError(redact(describeError(e)), LatencyLayer.tcp);
       }
-      final health = await _db.listHealth();
-      state = state.copyWith(
-        health: health,
-        testing: {...state.testing}..remove(n.id),
+    }
+    if (o.status == LatencyStatus.ok ||
+        o.status == LatencyStatus.failed ||
+        o.status == LatencyStatus.timeout) {
+      final h = await _db.recordHealth(
+        n.id,
+        latencyMs: o.ms,
+        error: o.status == LatencyStatus.ok
+            ? null
+            : (o.error ?? (o.status == LatencyStatus.timeout ? '超时' : '失败')),
+        method: (o.layer ?? LatencyLayer.tcp).name,
       );
-    });
+      if (ref.mounted) state = state.copyWith(health: {...state.health, n.id: h});
+    }
+    return o;
   }
 }
 
@@ -494,7 +572,7 @@ class VpnStatus {
 }
 
 class VpnController extends Notifier<VpnStatus> {
-  final meter = TrafficMeter();
+  final meter = TrafficMeter(maxSamples: 160);
   StreamSubscription<EngineEvent>? _sub;
 
   @override
@@ -509,6 +587,7 @@ class VpnController extends Notifier<VpnStatus> {
       engine
           .currentState()
           .then((s) {
+            if (!ref.mounted) return;
             state = state.copyWith(state: s.$1, message: s.$2);
           })
           .catchError((Object e) {
@@ -524,7 +603,14 @@ class VpnController extends Notifier<VpnStatus> {
     if (e.state != null) {
       final s = e.state!;
       _log('VPN 状态：${s.name}${e.message != null ? '（${e.message}）' : ''}');
-      if (s == VpnState.started && state.state != VpnState.started) {
+      final wasStarted = state.state == VpnState.started;
+      if ((s == VpnState.started) != wasStarted) {
+        // 检测层级随 VPN 开关而变（TCP ↔ 经代理），旧的本次检测结果作废
+        Future.microtask(
+          () => ref.read(nodesProvider.notifier).onNetworkChanged(),
+        );
+      }
+      if (s == VpnState.started && !wasStarted) {
         meter.reset();
         state = state.copyWith(
           state: s,
@@ -547,7 +633,25 @@ class VpnController extends Notifier<VpnStatus> {
     }
   }
 
+  bool _connecting = false;
+
+  /// 发起连接。重复调用（连接流程尚未结束）会被忽略。
   Future<String?> connect() async {
+    if (_connecting ||
+        state.state == VpnState.starting ||
+        state.state == VpnState.started ||
+        state.state == VpnState.stopping) {
+      return null;
+    }
+    _connecting = true;
+    try {
+      return await _connect();
+    } finally {
+      _connecting = false;
+    }
+  }
+
+  Future<String?> _connect() async {
     final nodes = ref.read(nodesProvider);
     final sel = nodes.selected;
     if (sel == null) return '请先选择一个节点';
@@ -588,6 +692,9 @@ class VpnController extends Notifier<VpnStatus> {
   }
 
   Future<void> disconnect() async {
+    if (state.state == VpnState.stopping || state.state == VpnState.stopped) {
+      return;
+    }
     state = state.copyWith(state: VpnState.stopping);
     await ref.read(vpnEngineProvider).stop();
   }

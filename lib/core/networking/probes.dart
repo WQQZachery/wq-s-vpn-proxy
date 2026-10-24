@@ -244,7 +244,7 @@ class NetworkProbes {
   }) async {
     final client = HttpClient()
       ..connectionTimeout = timeout
-      ..userAgent = 'WQsProxyVPN/1.0.0';
+      ..userAgent = 'WQsProxyVPN/1.1.0';
     final sw = Stopwatch()..start();
     try {
       final req = await client.getUrl(url).timeout(timeout);
@@ -275,6 +275,26 @@ class NetworkProbes {
     final ms = sw.elapsedMilliseconds;
     s.destroy();
     return ms;
+  }
+
+  /// TLS 握手（严格校验证书，不允许跳过）。返回握手耗时 ms。只证明 TLS 端点正常，不代表代理认证可用。
+  Future<int> tlsHandshake(String host, int port, {String? serverName}) async {
+    final sw = Stopwatch()..start();
+    final raw = await Socket.connect(host, port, timeout: timeout);
+    try {
+      final sni = (serverName == null || serverName.isEmpty) ? host : serverName;
+      final s = await SecureSocket.secure(
+        raw,
+        host: sni,
+        onBadCertificate: (_) => false,
+      ).timeout(timeout);
+      final ms = sw.elapsedMilliseconds;
+      s.destroy();
+      return ms;
+    } catch (_) {
+      raw.destroy();
+      rethrow;
+    }
   }
 }
 

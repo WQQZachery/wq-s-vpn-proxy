@@ -18,7 +18,25 @@
 APK SHA-256：`785a42f55a119f65743862255cc1236895ff581ab374b04efa14f9a36c241f47`
 签名：Flutter 模板 debug 签名（仅用于自测安装）。
 
-## 单元测试覆盖
+## 1.1.0（UI 与核心体验升级）— 2026-10-24
+
+| 项目 | 命令 | 结果 |
+|---|---|---|
+| 静态分析 | `flutter analyze` | 0 error / 0 warning，56 条 info（风格提示与 RadioListTile 弃用提示），日志 `logs/analyze-6.log` |
+| 全部测试 | `NO_PROXY=127.0.0.1,localhost flutter test` | **96 个全部通过**（原 59 + 新增 37），日志 `logs/test-6.log` |
+| release 构建 | `flutter build apk --release --target-platform android-arm64` | 成功，27,938,256 字节，仅 arm64-v8a，日志 `logs/build-app-4.log` |
+| 测速引擎实网冒烟（开发机，经代理，非手机） | `dart run tool/speedtest_smoke.dart mlab 127.0.0.1:3128` | M-Lab ndt7 完成：下载 875 Mbps / 上传 135 Mbps / 延迟 42.7 ms；Cloudflare 端点重复测试后返回 HTTP 429 限流（已据此调整选择策略），日志 `logs/speedtest-smoke-*.log` |
+| 视觉检查（开发机渲染截图） | `flutter test tool/screens/screens_test.dart --update-goldens` | 首页（未连接/已连接含曲线）、节点、检测、设置、水波中间帧、信誉面板、仪表盘均人工检查；发现并修复：大字体溢出 3 处、节点页标签截断、Hysteria2 误显示 tcp、转场“双重曝光” |
+| 真机 / 模拟器 | — | **未执行**（无设备）：动画帧率、120 Hz、触觉、真实 VPN 下曲线与代理层检测、手机测速均未验证 |
+
+APK SHA-256：`7323699436e0c08982e7fca06dfe79762fbc7ca264f59ab4e890ebf96c0d2374`（debug 签名）
+
+新增测试覆盖：单调插值不越界（200 组随机）与过点、刻度/平滑帧率无关；延迟调度并发上限、结果不错位、冷却与新鲜度复用、去重、取消、异常不卡队列、错误归类；
+吞吐预热排除/窗口截止/回落、中位数与抖动、仪表刻度单调、M-Lab 定位解析、Server-Timing、ndt7 字节、服务器评分、测速失败不产生数值、取消；
+AbuseIPDB 类型化字段/缺 data/未配置 Key/成功/限额 UI；连接按钮状态映射穷举（非 started 永不为“已连接”）、连接中→失败、锁定、减少动态效果；
+实时曲线组件；导航快速切换保留状态与返回键；整壳 360×640 dp + 1.3 倍字体四页无溢出、空状态、打开测速页。
+
+## 1.0.0 单元测试覆盖
 
 - 分享链接解析：ss（SIP002 / 旧格式 / 插件拒绝）、vmess（ws+tls）、vless（REALITY+Vision，缺 pbk 拒绝）、trojan（gRPC）、hysteria2（salamander，端口跳跃明确报“不支持”）、tuic、socks5、未知协议、端口越界。
 - 订阅：Base64 订阅含错误条目统计、sing-box JSON 订阅（跳过 selector/direct，naive 记为不支持）、HTML / Clash YAML / 空内容的明确报错、去重。

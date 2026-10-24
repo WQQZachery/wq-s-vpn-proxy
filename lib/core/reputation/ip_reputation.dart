@@ -103,12 +103,57 @@ class ReputationReport {
     required this.fields,
     required this.fetchedAt,
     this.fromCache = false,
+    this.raw = const {},
+    this.quotaLimit,
+    this.quotaRemaining,
   });
   final String provider;
+
+  /// 来自响应头 X-RateLimit-Limit / X-RateLimit-Remaining（每日配额）；未返回时为 null。
+  final int? quotaLimit;
+  final int? quotaRemaining;
   final String ip;
   final List<ReputationField> fields;
   final DateTime fetchedAt;
   final bool fromCache;
+
+  /// 接口返回的 data 原始字段（类型化读取用）。
+  final Map<String, dynamic> raw;
+
+  int? get abuseScore => (raw['abuseConfidenceScore'] as num?)?.toInt();
+  int? get totalReports => (raw['totalReports'] as num?)?.toInt();
+  int? get distinctUsers => (raw['numDistinctUsers'] as num?)?.toInt();
+  DateTime? get lastReportedAt =>
+      DateTime.tryParse('${raw['lastReportedAt'] ?? ''}');
+  String? get usageType => raw['usageType'] as String?;
+  String? get isp => raw['isp'] as String?;
+  String? get domain => raw['domain'] as String?;
+  String? get countryCode => raw['countryCode'] as String?;
+  bool? get isTor => raw['isTor'] as bool?;
+  bool? get isWhitelisted => raw['isWhitelisted'] as bool?;
+  bool? get isPublic => raw['isPublic'] as bool?;
+
+  /// 统计窗口（查询参数 maxAgeInDays）。
+  static const maxAgeDays = 90;
+
+  ReputationReport cachedCopy() => ReputationReport(
+    provider: provider,
+    ip: ip,
+    fields: fields,
+    fetchedAt: fetchedAt,
+    fromCache: true,
+    raw: raw,
+    quotaLimit: quotaLimit,
+    quotaRemaining: quotaRemaining,
+  );
+}
+
+/// 滥用置信度的中文分档说明（仅描述 AbuseIPDB 分数本身的含义，不是对 IP 安全性的结论）。
+String abuseScoreBand(int score) {
+  if (score == 0) return '近 90 天内没有可计入的举报';
+  if (score < 25) return '有少量举报，置信度低';
+  if (score < 75) return '有一定数量的举报，置信度中等';
+  return '举报较多，AbuseIPDB 认为滥用可能性高';
 }
 
 /// 解析 AbuseIPDB v2 /check 返回。
@@ -121,6 +166,7 @@ ReputationReport parseAbuseIpDb(String body, DateTime now) {
     provider: 'AbuseIPDB',
     ip: v('ipAddress'),
     fetchedAt: now,
+    raw: d,
     fields: [
       ReputationField(
         'abuseConfidenceScore',
@@ -140,6 +186,8 @@ ReputationReport parseAbuseIpDb(String body, DateTime now) {
         'AbuseIPDB 对该 IP 用途的分类（如 Data Center/Web Hosting/Transit）',
       ),
       ReputationField('isp', v('isp'), 'AbuseIPDB 记录的 ISP'),
+      ReputationField('domain', v('domain'), 'AbuseIPDB 记录的所属域名'),
+      ReputationField('isPublic', v('isPublic'), '是否为公网地址'),
       ReputationField('countryCode', v('countryCode'), 'AbuseIPDB 记录的国家代码'),
       ReputationField('isTor', v('isTor'), '是否为已知 Tor 出口节点'),
       ReputationField(
@@ -151,10 +199,22 @@ ReputationReport parseAbuseIpDb(String body, DateTime now) {
   );
 }
 
+/// 失败原因分类，界面据此给出不同的提示。
+enum ReputationFailure { noKey, quota, auth, http, network, data }
+
 class ReputationException implements Exception {
-  ReputationException(this.kind, this.message);
+  ReputationException(this.kind, this.message, [ReputationFailure? failure])
+    : failure = failure ??
+          switch (kind) {
+            ProbeErrorKind.quotaExceeded => ReputationFailure.quota,
+            ProbeErrorKind.apiUnavailable => ReputationFailure.data,
+            ProbeErrorKind.httpError => ReputationFailure.http,
+            ProbeErrorKind.protocolError => ReputationFailure.data,
+            _ => ReputationFailure.network,
+          };
   final ProbeErrorKind kind;
   final String message;
+  final ReputationFailure failure;
   @override
   String toString() => message;
 }
@@ -202,17 +262,12 @@ class IpReputationService {
       throw ReputationException(
         ProbeErrorKind.apiUnavailable,
         '未配置 AbuseIPDB API Key',
+        ReputationFailure.noKey,
       );
     final cached = _cache[ip];
     if (cached != null &&
         DateTime.now().difference(cached.fetchedAt) < cacheTtl) {
-      return ReputationReport(
-        provider: cached.provider,
-        ip: cached.ip,
-        fields: cached.fields,
-        fetchedAt: cached.fetchedAt,
-        fromCache: true,
-      );
+      return cached.cachedCopy();
     }
     final url = Uri.parse(endpoint)
         .replace(queryParameters: {'ipAddress': ip, 'maxAgeInDays': '90'});
@@ -240,6 +295,7 @@ class IpReputationService {
         throw ReputationException(
           ProbeErrorKind.httpError,
           'API Key 无效或无权限（HTTP ${r.status}）',
+          ReputationFailure.auth,
         );
       if (r.status >= 500 && attempt == 0) {
         await Future<void>.delayed(const Duration(seconds: 1));
@@ -250,9 +306,27 @@ class IpReputationService {
           ProbeErrorKind.httpError,
           'AbuseIPDB 返回 HTTP ${r.status}',
         );
-      final rep = parseAbuseIpDb(r.body, DateTime.now());
-      _cache[ip] = rep;
-      return rep;
+      final ReputationReport rep;
+      try {
+        rep = parseAbuseIpDb(r.body, DateTime.now());
+      } on FormatException catch (e) {
+        throw ReputationException(
+          ProbeErrorKind.protocolError,
+          '返回数据不完整：${e.message}',
+          ReputationFailure.data,
+        );
+      }
+      final withQuota = ReputationReport(
+        provider: rep.provider,
+        ip: rep.ip,
+        fields: rep.fields,
+        fetchedAt: rep.fetchedAt,
+        raw: rep.raw,
+        quotaLimit: int.tryParse(r.headers['x-ratelimit-limit'] ?? ''),
+        quotaRemaining: int.tryParse(r.headers['x-ratelimit-remaining'] ?? ''),
+      );
+      _cache[ip] = withQuota;
+      return withQuota;
     }
     throw ReputationException(ProbeErrorKind.apiUnavailable, '数据不可用');
   }

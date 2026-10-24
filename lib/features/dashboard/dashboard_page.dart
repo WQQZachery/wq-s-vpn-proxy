@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import 'dart:async';
+import 'dart:ui' show FontFeature;
 
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +9,11 @@ import '../../app/state.dart';
 import '../../app/theme.dart';
 import '../../core/engine/traffic_meter.dart';
 import '../../core/models/models.dart';
+import '../profiles/profiles_page.dart' show transportLabel;
+import 'connect_orb.dart';
+import 'live_speed_chart.dart';
+
+const _tabular = [FontFeature.tabularFigures()];
 
 class DashboardPage extends ConsumerStatefulWidget {
   const DashboardPage({super.key});
@@ -17,37 +22,30 @@ class DashboardPage extends ConsumerStatefulWidget {
 }
 
 class _DashboardPageState extends ConsumerState<DashboardPage> {
-  Timer? _clock;
   bool _busy = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _clock = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && ref.read(vpnControllerProvider).state == VpnState.started)
-        setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _clock?.cancel();
-    super.dispose();
-  }
+  /// 连接前置步骤（配置校验 / 授权）失败的原因。仅用于界面提示，不改变真实 VPN 状态。
+  String? _localError;
 
   Future<void> _toggle() async {
+    if (_busy) return; // 防重复点击
     final ctrl = ref.read(vpnControllerProvider.notifier);
     final s = ref.read(vpnControllerProvider).state;
-    setState(() => _busy = true);
+    if (s == VpnState.stopping) return; // 状态锁定
+    setState(() {
+      _busy = true;
+      _localError = null;
+    });
     try {
       if (s == VpnState.started || s == VpnState.starting) {
+        // 连接中再次轻点 = 取消连接
         await ctrl.disconnect();
       } else {
         final err = await ctrl.connect();
-        if (err != null && mounted) showSnack(context, err);
+        if (err != null && mounted) setState(() => _localError = err);
       }
     } catch (e) {
-      if (mounted) showSnack(context, '操作失败：$e');
+      if (mounted) setState(() => _localError = '操作失败：$e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -59,259 +57,404 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
     final nodes = ref.watch(nodesProvider);
     final meter = ref.read(vpnControllerProvider.notifier).meter;
     final sel = nodes.selected;
-    final health = sel == null ? null : nodes.health[sel.id];
-    final (label, color) = switch (vpn.state) {
-      VpnState.started => ('已连接', kGood),
-      VpnState.starting => ('连接中…', kWarn),
-      VpnState.stopping => ('断开中…', kWarn),
-      VpnState.error => ('错误', kBad),
-      VpnState.stopped => ('未连接', Colors.white54),
-    };
+    var phase = orbPhaseFor(vpn.state, busy: _busy);
+    if (phase == OrbPhase.idle && _localError != null) phase = OrbPhase.error;
+    final errorText = vpn.state == VpnState.error
+        ? (vpn.message ?? '核心报告错误')
+        : (phase == OrbPhase.error ? _localError : null);
     final connected = vpn.state == VpnState.started;
+    final locked = _busy || vpn.state == VpnState.stopping;
     final latest = connected ? meter.latest : null;
+
     return ListView(
-      padding: const EdgeInsets.only(bottom: 24),
+      padding: const EdgeInsets.only(bottom: Gaps.xl),
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
-          child: Text(
-            "WQ's Proxy VPN",
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+        PageHeader(
+          "WQ's Proxy VPN",
+          subtitle: Text(
+            connected && vpn.mode != null ? '路由模式：${vpn.mode!.label}' : 'sing-box 内核',
           ),
         ),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              children: [
-                GestureDetector(
-                  onTap: _busy ? null : _toggle,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 300),
-                    width: 140,
-                    height: 140,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: color.withValues(alpha: 0.15),
-                      border: Border.all(color: color, width: 3),
-                    ),
-                    child: Center(
-                      child:
-                          _busy ||
-                              vpn.state == VpnState.starting ||
-                              vpn.state == VpnState.stopping
-                          ? const CircularProgressIndicator()
-                          : Icon(
-                              Icons.power_settings_new,
-                              size: 64,
-                              color: color,
-                            ),
-                    ),
+        AppCard(
+          padding: const EdgeInsets.fromLTRB(Gaps.card, 8, Gaps.card, 20),
+          highlight: connected ? kGood : (phase == OrbPhase.error ? kBad : null),
+          child: Column(
+            children: [
+              ConnectOrb(
+                phase: phase,
+                onTap: locked || (sel == null && !connected) ? null : _toggle,
+              ),
+              SwapSwitcher(
+                identity: phase,
+                transitionBuilder: (child, a) => FadeTransition(
+                  opacity: a,
+                  child: SlideTransition(
+                    position: Tween(
+                      begin: const Offset(0, 0.25),
+                      end: Offset.zero,
+                    ).animate(a),
+                    child: child,
                   ),
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  label,
+                child: Text(
+                  orbLabel(phase),
                   style: TextStyle(
                     fontSize: 20,
-                    color: color,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
+                    color: orbColor(phase),
                   ),
                 ),
-                if (vpn.message != null && vpn.state == VpnState.error)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      vpn.message!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: kBad),
-                    ),
-                  ),
-                const SizedBox(height: 8),
-                Text(
-                  sel == null ? '未选择节点（请到“节点”页添加）' : '当前节点：${sel.name}',
-                  style: const TextStyle(color: Colors.white70),
-                ),
-                if (connected && vpn.mode != null)
-                  Text(
-                    '路由：${vpn.mode!.label}',
-                    style: const TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 6),
+              _SessionClock(
+                connectedAt: connected ? vpn.connectedAt : null,
+                hint: switch (phase) {
+                  OrbPhase.connecting => '正在启动 sing-box 内核，轻点可取消',
+                  OrbPhase.preparing => '正在校验配置与 VPN 授权',
+                  OrbPhase.disconnecting => '正在停止内核',
+                  _ => sel == null ? '请先在“节点”页选择节点' : '轻点按钮连接',
+                },
+              ),
+              AnimatedSize(
+                duration: Motion.of(context, Motion.medium),
+                curve: Curves.easeOutCubic,
+                child: errorText == null
+                    ? const SizedBox(width: double.infinity)
+                    : Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          errorText,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: kBad, fontSize: 13),
+                        ),
+                      ),
+              ),
+              const SizedBox(height: 14),
+              _NodeStrip(
+                name: sel?.name,
+                detail: sel == null
+                    ? null
+                    : '${sel.protocol.label} · ${transportLabel(sel)}${sel.tls.isReality ? ' · REALITY' : (sel.tls.enabled ? ' · TLS' : '')}',
+                latency: sel == null ? null : nodes.health[sel.id],
+              ),
+            ],
           ),
         ),
-        const SectionTitle('实时速度（VPN 实际流量）'),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 16, 16, 8),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _metric(
-                      '下载',
-                      formatBps(latest?.downBps),
-                      Icons.arrow_downward,
-                      kAccent,
+        const SectionTitle(
+          '实时速度',
+          info: '数据来自 sing-box 内核对 VPN 隧道流量的真实计数，约每 0.5 秒采样一次。\n'
+              '曲线在两次真实采样之间用单调插值连线，并滞后约一个采样间隔滚动，以保证平滑；插值不会产生超出相邻两次实测值的数值，也不预测未来。\n'
+              '这是“VPN 当前实际流量”，不是测速结果；没有流量时显示接近 0 是正常的。',
+        ),
+        AppCard(
+          padding: const EdgeInsets.fromLTRB(Gaps.card, 14, Gaps.card, 12),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: _Metric(
+                      label: '下载',
+                      value: formatBps(latest?.downBps),
+                      color: kAccent,
+                      icon: Icons.south_rounded,
                     ),
-                    _metric(
-                      '上传',
-                      formatBps(latest?.upBps),
-                      Icons.arrow_upward,
-                      kGood,
+                  ),
+                  Expanded(
+                    child: _Metric(
+                      label: '上传',
+                      value: formatBps(latest?.upBps),
+                      color: kUpload,
+                      icon: Icons.north_rounded,
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  height: 140,
-                  child: connected && meter.hasData
-                      ? _chart(meter)
-                      : const Center(
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 150,
+                child: SwapSwitcher(
+                identity: connected && meter.hasData,
+                child: connected && meter.hasData
+                      ? LiveSpeedChart(
+                          meter: meter,
+                          active: connected,
+                          sampleCount: vpn.tick,
+                        )
+                      : Center(
                           child: Text(
-                            '暂无数据',
-                            style: TextStyle(color: Colors.white38),
+                            connected ? '等待首个采样…' : '连接 VPN 后显示实时流量',
+                            style: const TextStyle(color: AppColors.textMuted),
                           ),
                         ),
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 8),
+              const Row(
+                children: [
+                  _Legend(color: kAccent, label: '下载'),
+                  SizedBox(width: 16),
+                  _Legend(color: kUpload, label: '上传'),
+                  Spacer(),
+                  Text(
+                    '最近 60 秒',
+                    style: TextStyle(fontSize: 11, color: AppColors.textMuted),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
-        const SectionTitle('会话统计'),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: [
-                _stat(
-                  '会话时长',
-                  connected && vpn.connectedAt != null
-                      ? formatDuration(
-                          DateTime.now().difference(vpn.connectedAt!),
-                        )
-                      : '—',
-                ),
-                _stat(
-                  '累计下载',
-                  connected && meter.hasData
-                      ? formatBytes(meter.sessionRxBytes)
-                      : '暂无数据',
-                ),
-                _stat(
-                  '累计上传',
-                  connected && meter.hasData
-                      ? formatBytes(meter.sessionTxBytes)
-                      : '暂无数据',
-                ),
-                _stat(
-                  '下载峰值',
-                  connected && meter.hasData
-                      ? formatBps(meter.peakDownBps)
-                      : '暂无数据',
-                ),
-                _stat(
-                  '上传峰值',
-                  connected && meter.hasData
-                      ? formatBps(meter.peakUpBps)
-                      : '暂无数据',
-                ),
-                _stat(
-                  '节点延迟',
-                  health?.lastLatencyMs != null
-                      ? '${health!.lastLatencyMs} ms（${health.method == 'proxy' ? '代理' : '仅TCP'}）'
-                      : (health?.lastError != null ? '测试失败' : '未测试'),
-                ),
-              ],
-            ),
+        const SectionTitle('本次会话'),
+        AppCard(
+          child: LayoutBuilder(
+            builder: (context, c) {
+              final w = (c.maxWidth - Gaps.md) / 2;
+              String v(String Function() f) =>
+                  connected && meter.hasData ? f() : '—';
+              return Wrap(
+                spacing: Gaps.md,
+                runSpacing: 14,
+                children: [
+                  _Stat(w, '累计下载', v(() => formatBytes(meter.sessionRxBytes))),
+                  _Stat(w, '累计上传', v(() => formatBytes(meter.sessionTxBytes))),
+                  _Stat(w, '下载峰值', v(() => formatBps(meter.peakDownBps))),
+                  _Stat(w, '上传峰值', v(() => formatBps(meter.peakUpBps))),
+                ],
+              );
+            },
           ),
         ),
       ],
     );
   }
+}
 
-  Widget _metric(String t, String v, IconData i, Color c) => Column(
-    children: [
-      Row(
-        mainAxisSize: MainAxisSize.min,
+/// 会话时长：独立的每秒计时器，只重建这一行文字，不重建整页。
+class _SessionClock extends StatefulWidget {
+  const _SessionClock({required this.connectedAt, required this.hint});
+  final DateTime? connectedAt;
+  final String hint;
+  @override
+  State<_SessionClock> createState() => _SessionClockState();
+}
+
+class _SessionClockState extends State<_SessionClock> {
+  Timer? _t;
+  @override
+  void initState() {
+    super.initState();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(_SessionClock old) {
+    super.didUpdateWidget(old);
+    _sync();
+  }
+
+  void _sync() {
+    if (widget.connectedAt != null && _t == null) {
+      _t = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (widget.connectedAt == null) {
+      _t?.cancel();
+      _t = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+    widget.connectedAt == null
+        ? widget.hint
+        : '已连接 ${formatDuration(DateTime.now().difference(widget.connectedAt!))}',
+    style: const TextStyle(
+      fontSize: 13,
+      color: AppColors.textTertiary,
+      fontFeatures: _tabular,
+    ),
+  );
+}
+
+class _NodeStrip extends StatelessWidget {
+  const _NodeStrip({this.name, this.detail, this.latency});
+  final String? name;
+  final String? detail;
+  final NodeHealth? latency;
+  @override
+  Widget build(BuildContext context) {
+    final h = latency;
+    String? lat;
+    Color latColor = AppColors.textTertiary;
+    if (h?.lastLatencyMs != null && h?.lastError == null) {
+      lat = '${h!.lastLatencyMs} ms';
+      latColor = h.method == 'proxy' ? kGood : AppColors.textSecondary;
+    } else if (h?.lastError != null) {
+      lat = '检测失败';
+      latColor = kBad;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceHigh,
+        borderRadius: BorderRadius.circular(Radii.md),
+      ),
+      child: Row(
         children: [
-          Icon(i, size: 16, color: c),
-          const SizedBox(width: 4),
-          Text(t, style: const TextStyle(color: Colors.white60)),
+          const Icon(Icons.dns_rounded, size: 18, color: AppColors.textTertiary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name ?? '未选择节点',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  detail ?? '请到“节点”页添加或选择节点',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textTertiary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (lat != null) ...[
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  lat,
+                  style: TextStyle(
+                    color: latColor,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: _tabular,
+                  ),
+                ),
+                Text(
+                  h!.method == 'proxy'
+                      ? '代理延迟'
+                      : (h.method == 'tls' ? 'TLS 握手' : '仅 TCP'),
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
-      const SizedBox(height: 4),
-      Text(
-        v,
-        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+    );
+  }
+}
+
+class _Metric extends StatelessWidget {
+  const _Metric({
+    required this.label,
+    required this.value,
+    required this.color,
+    required this.icon,
+  });
+  final String label;
+  final String value;
+  final Color color;
+  final IconData icon;
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 12, color: AppColors.textTertiary),
+          ),
+        ],
+      ),
+      const SizedBox(height: 2),
+      FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: Alignment.centerLeft,
+        child: Text(
+          value,
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            fontFeatures: _tabular,
+          ),
+        ),
       ),
     ],
   );
+}
 
-  Widget _stat(String t, String v) => SizedBox(
-    width: 150,
+class _Legend extends StatelessWidget {
+  const _Legend({required this.color, required this.label});
+  final Color color;
+  final String label;
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 10,
+        height: 3,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+      const SizedBox(width: 6),
+      Text(
+        label,
+        style: const TextStyle(fontSize: 11, color: AppColors.textTertiary),
+      ),
+    ],
+  );
+}
+
+class _Stat extends StatelessWidget {
+  const _Stat(this.width, this.title, this.value);
+  final double width;
+  final String title;
+  final String value;
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: width,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(t, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        Text(
+          title,
+          style: const TextStyle(fontSize: 12, color: AppColors.textTertiary),
+        ),
         const SizedBox(height: 2),
         Text(
-          v,
-          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+          value,
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            fontFeatures: _tabular,
+          ),
         ),
       ],
     ),
   );
-
-  Widget _chart(TrafficMeter m) {
-    final s = m.samples;
-    final t0 = s.first.timestampMs;
-    List<FlSpot> spots(double Function(SpeedSample) f) => [
-      for (final x in s) FlSpot((x.timestampMs - t0) / 1000, f(x) / 1e6),
-    ];
-    return LineChart(
-      LineChartData(
-        minY: 0,
-        gridData: const FlGridData(show: true, drawVerticalLine: false),
-        borderData: FlBorderData(show: false),
-        titlesData: FlTitlesData(
-          topTitles: const AxisTitles(),
-          rightTitles: const AxisTitles(),
-          bottomTitles: const AxisTitles(),
-          leftTitles: AxisTitles(
-            sideTitles: SideTitles(
-              showTitles: true,
-              reservedSize: 36,
-              getTitlesWidget: (v, _) => Text(
-                v.toStringAsFixed(1),
-                style: const TextStyle(fontSize: 10, color: Colors.white38),
-              ),
-            ),
-          ),
-        ),
-        lineTouchData: const LineTouchData(enabled: false),
-        lineBarsData: [
-          LineChartBarData(
-            spots: spots((x) => x.downBps),
-            isCurved: true,
-            color: kAccent,
-            dotData: const FlDotData(show: false),
-            barWidth: 2,
-          ),
-          LineChartBarData(
-            spots: spots((x) => x.upBps),
-            isCurved: true,
-            color: kGood,
-            dotData: const FlDotData(show: false),
-            barWidth: 2,
-          ),
-        ],
-      ),
-      duration: Duration.zero,
-    );
-  }
 }
