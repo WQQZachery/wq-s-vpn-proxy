@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 撇号在 Android 字符串资源中必须转义为 \' -->
+    <string name="app_name">WQ\'s Proxy VPN</string>
+</resources>
