@@ -101,6 +101,8 @@ class RippleNavShellState extends State<RippleNavShell>
         if (!didPop && _index != 0) select(0);
       },
       child: Scaffold(
+        // 透明：底下是随 VPN 状态变化的全屏铺色层（vpn_tint.dart）
+        backgroundColor: Colors.transparent,
         body: Stack(
           key: _stackKey,
           children: [
@@ -200,7 +202,7 @@ class _NavBar extends StatelessWidget {
     final bottom = MediaQuery.paddingOf(context).bottom;
     return DecoratedBox(
       decoration: const BoxDecoration(
-        color: AppColors.surface,
+        color: Color(0xE612151C), // surface 90%，让状态色略微透出
         border: Border(top: BorderSide(color: AppColors.border)),
       ),
       child: Padding(

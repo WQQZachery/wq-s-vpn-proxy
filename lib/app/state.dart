@@ -57,7 +57,11 @@ class SettingsState {
     this.abuseIpDbKey = '',
     this.cloudflareTarget = 'https://www.cloudflare.com/cdn-cgi/trace',
     this.claudeTarget = 'https://api.anthropic.com/v1/messages',
+    this.autoTestNodes = false,
   });
+
+  /// 进入节点页时是否自动检测。默认关闭，由用户在设置中开启。
+  final bool autoTestNodes;
   final EngineSettings engine;
   final int retentionDays;
   final String abuseIpDbKey;
@@ -70,7 +74,9 @@ class SettingsState {
     String? abuseIpDbKey,
     String? cloudflareTarget,
     String? claudeTarget,
+    bool? autoTestNodes,
   }) => SettingsState(
+    autoTestNodes: autoTestNodes ?? this.autoTestNodes,
     engine: engine ?? this.engine,
     retentionDays: retentionDays ?? this.retentionDays,
     abuseIpDbKey: abuseIpDbKey ?? this.abuseIpDbKey,
@@ -95,8 +101,10 @@ class SettingsNotifier extends Notifier<SettingsState> {
     final key = await db.getSecretSetting('abuseipdb') ?? '';
     final cf = await db.getKv('cfTarget');
     final claude = await db.getKv('claudeTarget');
+    final auto = await db.getKv('autoTestNodes');
     if (!ref.mounted) return;
     state = SettingsState(
+      autoTestNodes: auto == '1',
       engine: raw == null
           ? const EngineSettings()
           : EngineSettings.fromJson(
@@ -119,6 +127,11 @@ class SettingsNotifier extends Notifier<SettingsState> {
     state = state.copyWith(retentionDays: days);
     await _db.setKv('retentionDays', '$days');
     await _db.pruneProbes(Duration(days: days));
+  }
+
+  Future<void> setAutoTestNodes(bool v) async {
+    state = state.copyWith(autoTestNodes: v);
+    await _db.setKv('autoTestNodes', v ? '1' : '0');
   }
 
   Future<void> setAbuseKey(String k) async {
@@ -376,7 +389,7 @@ class NodesNotifier extends Notifier<NodesState> {
     _log('更新订阅「${s.name}」：${redactUrl(s.url)}');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
-      ..userAgent = 'WQsProxyVPN/1.2.0 (sing-box 1.14)';
+      ..userAgent = 'WQsProxyVPN/1.2.1 (sing-box 1.14)';
     try {
       final req = await client
           .getUrl(Uri.parse(s.url))
@@ -465,7 +478,11 @@ class NodesNotifier extends Notifier<NodesState> {
       final tag = vpn.nodeTags[n.id];
       if (tag == null || vpn.clash == null) {
         // VPN 开启时本应用流量也经隧道，直接 TCP 探测会被 TUN 本地应答，结果无意义，因此不做。
-        return const ProbeOutcome.unsupported('不在当前运行配置中，重新连接后可检测');
+        return ProbeOutcome.unsupported(
+          vpn.clash == null
+              ? '正在恢复 VPN 会话，稍后重试'
+              : '连接后新增/启用的节点，断开重连后可检测',
+        );
       }
       try {
         final ms = await vpn.clash!.delay(tag, timeoutMs: 5000);
@@ -595,9 +612,12 @@ class VpnController extends Notifier<VpnStatus> {
     unawaited(
       engine
           .currentState()
-          .then((s) {
+          .then((s) async {
             if (!ref.mounted) return;
             state = state.copyWith(state: s.$1, message: s.$2);
+            if (s.$1 == VpnState.started || s.$1 == VpnState.starting) {
+              await _restoreSession();
+            }
           })
           .catchError((Object e) {
             _log('读取原生状态失败：$e');
@@ -607,6 +627,53 @@ class VpnController extends Notifier<VpnStatus> {
   }
 
   void _log(String m) => ref.read(appLogProvider.notifier).add(m);
+
+  static const _sessionKey = 'vpnSession';
+
+  /// VPN 在后台服务中持续运行，而界面进程可能被系统回收后重建。
+  /// 运行会话（Clash API 端口/密钥、节点 tag 映射）保存在安全存储中，
+  /// 界面重建后据此恢复，否则节点检测和运行中切换节点都会失效。
+  Future<void> _saveSession(BuiltConfig built, int port, String secret, String name) async {
+    try {
+      await ref.read(databaseProvider).setSecretSetting(
+        _sessionKey,
+        jsonEncode({
+          'port': port,
+          'secret': secret,
+          'tags': built.nodeTags,
+          'name': name,
+          'mode': state.mode?.name,
+        }),
+      );
+    } catch (e) {
+      _log('保存运行会话失败：$e');
+    }
+  }
+
+  Future<void> _restoreSession() async {
+    if (state.clash != null) return;
+    try {
+      final raw = await ref.read(databaseProvider).getSecretSetting(_sessionKey);
+      if (raw == null || raw.isEmpty || !ref.mounted || state.clash != null) return;
+      final j = (jsonDecode(raw) as Map).cast<String, dynamic>();
+      state = state.copyWith(
+        clash: ClashApiClient(
+          port: (j['port'] as num).toInt(),
+          secret: j['secret'] as String,
+        ),
+        nodeTags: ((j['tags'] as Map?) ?? const {}).map(
+          (k, v) => MapEntry('$k', '$v'),
+        ),
+        nodeName: j['name'] as String?,
+        mode: RouteMode.values.asNameMap()[j['mode']],
+        connectedAt: state.connectedAt ?? DateTime.now(),
+      );
+      _log('已恢复运行中的 VPN 会话（${state.nodeTags.length} 个节点可检测）');
+      Future.microtask(() => ref.read(nodesProvider.notifier).onNetworkChanged());
+    } catch (e) {
+      _log('恢复运行会话失败：$e');
+    }
+  }
 
   void _onEvent(EngineEvent e) {
     if (e.state != null) {
@@ -623,7 +690,10 @@ class VpnController extends Notifier<VpnStatus> {
         );
         return;
       }
-      if (s == VpnState.started) _timedOut = false;
+      if (s == VpnState.started) {
+        _timedOut = false;
+        if (state.clash == null) unawaited(_restoreSession());
+      }
       final wasStarted = state.state == VpnState.started;
       if ((s == VpnState.started) != wasStarted) {
         // 检测层级随 VPN 开关而变（TCP ↔ 经代理），旧的本次检测结果作废
@@ -707,6 +777,7 @@ class VpnController extends Notifier<VpnStatus> {
       clash: ClashApiClient(port: settings.clashApiPort, secret: secret),
       mode: settings.routeMode,
     );
+    await _saveSession(built, settings.clashApiPort, secret, sel.name);
     _timedOut = false;
     _startTimer?.cancel();
     _startTimer = Timer(startTimeout, () {

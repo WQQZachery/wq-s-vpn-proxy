@@ -116,7 +116,7 @@ List<NodeGroup> groupNodes(
 
 class NodeGroupPrefs {
   const NodeGroupPrefs({
-    this.mode = NodeGroupMode.none,
+    this.mode = NodeGroupMode.source,
     this.sort = NodeSortMode.original,
     this.collapsed = const {},
   });
@@ -146,7 +146,7 @@ class NodeGroupPrefs {
     try {
       final j = (jsonDecode(raw) as Map).cast<String, dynamic>();
       return NodeGroupPrefs(
-        mode: NodeGroupMode.values.asNameMap()[j['mode']] ?? NodeGroupMode.none,
+        mode: NodeGroupMode.values.asNameMap()[j['mode']] ?? NodeGroupMode.source,
         sort: NodeSortMode.values.asNameMap()[j['sort']] ?? NodeSortMode.original,
         collapsed: ((j['collapsed'] as List?) ?? const [])
             .whereType<String>()

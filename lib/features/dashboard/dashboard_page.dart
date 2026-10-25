@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/state.dart';
 import '../../app/theme.dart';
+import '../../app/vpn_tint.dart';
 import '../../core/engine/traffic_meter.dart';
 import '../../core/models/models.dart';
 import '../profiles/profiles_page.dart' show transportLabel;
@@ -23,6 +24,24 @@ class DashboardPage extends ConsumerStatefulWidget {
 
 class _DashboardPageState extends ConsumerState<DashboardPage> {
   bool _busy = false;
+  final _orbKey = GlobalKey();
+  OrbPhase? _tintPhase;
+
+  /// 把当前真实阶段对应的颜色交给全屏铺色层；颜色从连接按钮中心以水波形式铺满屏幕。
+  void _syncTint(OrbPhase phase) {
+    if (_tintPhase == phase) return;
+    _tintPhase = phase;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final box = _orbKey.currentContext?.findRenderObject() as RenderBox?;
+      final origin = box != null && box.hasSize && box.attached
+          ? box.localToGlobal(box.size.center(Offset.zero))
+          : null;
+      ref
+          .read(vpnTintProvider.notifier)
+          .set(phase == OrbPhase.idle ? null : orbColor(phase), origin: origin);
+    });
+  }
 
   /// 连接前置步骤（配置校验 / 授权）失败的原因。仅用于界面提示，不改变真实 VPN 状态。
   String? _localError;
@@ -65,6 +84,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
     final connected = vpn.state == VpnState.started;
     final locked = _busy || vpn.state == VpnState.stopping;
     final latest = connected ? meter.latest : null;
+    _syncTint(phase);
 
     return ListView(
       padding: const EdgeInsets.only(bottom: Gaps.xl),
@@ -81,6 +101,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
           child: Column(
             children: [
               ConnectOrb(
+                key: _orbKey,
                 phase: phase,
                 onTap: locked || (sel == null && !connected) ? null : _toggle,
               ),

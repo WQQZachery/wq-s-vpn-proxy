@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:proxypilot_mobile/app/state.dart';
 import 'package:proxypilot_mobile/app/theme.dart';
+import 'package:proxypilot_mobile/app/vpn_tint.dart';
 import 'package:proxypilot_mobile/core/engine/vpn_engine.dart';
 import 'package:proxypilot_mobile/core/models/models.dart';
 import 'package:proxypilot_mobile/core/networking/share_link_serializer.dart';
@@ -43,6 +44,7 @@ class FakeEngine extends VpnEngine {
   String? checkError;
   bool autoStarted;
   bool startThrows;
+  VpnState nativeState = VpnState.stopped;
   int starts = 0, stops = 0;
   final _ev = StreamController<EngineEvent>.broadcast();
 
@@ -51,7 +53,7 @@ class FakeEngine extends VpnEngine {
   @override
   Stream<EngineEvent> events() => _ev.stream;
   @override
-  Future<(VpnState, String?)> currentState() async => (VpnState.stopped, null);
+  Future<(VpnState, String?)> currentState() async => (nativeState, null);
   @override
   Future<bool> prepare() async => prepareOk;
   @override
@@ -137,7 +139,7 @@ void main() {
       expect(d.collapsed, p.collapsed);
       for (final bad in [null, '', '{', '[]', '{"mode":"nope","collapsed":[1,"a"]}']) {
         final x = NodeGroupPrefs.decode(bad);
-        expect(x.mode, NodeGroupMode.none);
+        expect(x.mode, NodeGroupMode.source);
       }
       expect(NodeGroupPrefs.decode('{"collapsed":[1,"a"]}').collapsed, {'a'});
     });
@@ -191,15 +193,16 @@ void main() {
     late ProviderContainer c;
     late FakeEngine engine;
 
-    Future<void> setup(FakeEngine e) async {
+    Future<void> setup(FakeEngine e, {AppDatabase? reuse}) async {
       engine = e;
       sqfliteFfiInit();
       final dir = await Directory.systemTemp.createTemp('pplife');
-      db = await AppDatabase.open(
-        MemorySecretStore(),
-        factory: databaseFactoryFfi,
-        path: '${dir.path}/t.db',
-      );
+      db = reuse ??
+          await AppDatabase.open(
+            MemorySecretStore(),
+            factory: databaseFactoryFfi,
+            path: '${dir.path}/t.db',
+          );
       await db.upsertNode(_n('node0', ProxyProtocol.trojan, name: '测试'));
       c = ProviderContainer(
         overrides: [
@@ -249,6 +252,33 @@ void main() {
       expect(c.read(vpnControllerProvider).state, VpnState.started);
     });
 
+    test('界面进程重建后恢复运行中会话：节点仍可经内核检测', () async {
+      await setup(FakeEngine(autoStarted: true));
+      await c.read(vpnControllerProvider.notifier).connect();
+      await settle();
+      final tags = c.read(vpnControllerProvider).nodeTags;
+      expect(tags, contains('node0'));
+      // 模拟界面进程被回收重建：新的容器、原生侧仍在运行
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      c.dispose();
+      final e2 = FakeEngine()..nativeState = VpnState.started;
+      await setup(e2, reuse: db);
+      await settle(150);
+      final st = c.read(vpnControllerProvider);
+      expect(st.state, VpnState.started);
+      expect(st.clash, isNotNull);
+      expect(st.nodeTags, tags);
+      expect(st.nodeName, '测试');
+    });
+
+    test('进入节点页自动检测默认关闭，可在设置中开启并持久化', () async {
+      await setup(FakeEngine());
+      await settle(100);
+      expect(c.read(settingsProvider).autoTestNodes, isFalse);
+      await c.read(settingsProvider.notifier).setAutoTestNodes(true);
+      expect(await db.getKv('autoTestNodes'), '1');
+    });
+
     test('快速连续点击只启动一次', () async {
       await setup(FakeEngine());
       final ctl = c.read(vpnControllerProvider.notifier);
@@ -277,6 +307,39 @@ void main() {
       r = await c.read(vpnControllerProvider.notifier).connect();
       expect(r, startsWith('启动失败'));
       expect(c.read(vpnControllerProvider).state, VpnState.error);
+    });
+  });
+
+  group('全屏状态色水波', () {
+    testWidgets('状态色改变时从原点扩散铺满后停止；减少动态效果时无波前层', (t) async {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      Future<void> pump({bool reduce = false}) => t.pumpWidget(
+        UncontrolledProviderScope(
+          container: c,
+          child: MaterialApp(
+            home: MediaQuery(
+              data: MediaQueryData(disableAnimations: reduce),
+              child: const VpnTintScope(child: SizedBox.expand()),
+            ),
+          ),
+        ),
+      );
+      await pump();
+      c.read(vpnTintProvider.notifier).set(kGood, origin: const Offset(200, 300));
+      await t.pump();
+      await t.pump(const Duration(milliseconds: 300));
+      expect(t.binding.hasScheduledFrame, isTrue);
+      await t.pumpAndSettle();
+      expect(t.binding.hasScheduledFrame, isFalse);
+      // 同色不重复触发
+      c.read(vpnTintProvider.notifier).set(kGood);
+      await t.pump();
+      expect(t.binding.hasScheduledFrame, isFalse);
+      await pump(reduce: true);
+      c.read(vpnTintProvider.notifier).set(kBad);
+      await t.pumpAndSettle();
+      expect(c.read(vpnTintProvider).color, kBad);
     });
   });
 

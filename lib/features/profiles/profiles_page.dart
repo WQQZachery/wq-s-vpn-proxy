@@ -16,6 +16,7 @@ import '../../app/theme.dart';
 import '../../core/engine/latency_tester.dart';
 import '../../core/models/models.dart';
 import '../../core/networking/share_link_serializer.dart';
+import '../../app/vpn_tint.dart';
 import 'node_editor.dart';
 import 'node_grouping.dart';
 import 'qr_import.dart';
@@ -121,7 +122,9 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
     // 等页面转场完成后再发起，避免与转场争抢首帧；快速切走又切回只保留最后一次
     _autoTimer?.cancel();
     _autoTimer = Timer(const Duration(milliseconds: 280), () {
-      if (mounted && widget.active) {
+      if (mounted &&
+          widget.active &&
+          ref.read(settingsProvider).autoTestNodes) {
         ref.read(nodesProvider.notifier).autoTest();
       }
     });
@@ -154,7 +157,10 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
   @override
   Widget build(BuildContext context) {
     ref.listen(nodesProvider.select((s) => s.loading), (prev, loading) {
-      if (prev == true && !loading && widget.active) {
+      if (prev == true &&
+          !loading &&
+          widget.active &&
+          ref.read(settingsProvider).autoTestNodes) {
         ref.read(nodesProvider.notifier).autoTest();
       }
     });
@@ -234,6 +240,14 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
               filter: _filter,
               onQuery: (v) => setState(() => _q = v),
               onFilter: (f) => setState(() => _filter = f),
+              groupLabel: prefs.mode == NodeGroupMode.none
+                  ? '分组'
+                  : '${prefs.mode.label}分组',
+              onGroup: () => _groupSheet(context),
+              bg: switch (ref.watch(vpnTintProvider).color) {
+                null => AppColors.bg,
+                final c => tintTop(c),
+              },
             ),
           ),
           if (st.loading)
@@ -911,7 +925,13 @@ class _SearchHeader extends SliverPersistentHeaderDelegate {
     required this.filter,
     required this.onQuery,
     required this.onFilter,
+    required this.groupLabel,
+    required this.onGroup,
+    required this.bg,
   });
+  final Color bg;
+  final String groupLabel;
+  final VoidCallback onGroup;
   final double textScale;
   final NodeFilter filter;
   final ValueChanged<String> onQuery;
@@ -937,7 +957,7 @@ class _SearchHeader extends SliverPersistentHeaderDelegate {
   Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: AppColors.bg,
+        color: bg.withValues(alpha: 0.96),
         border: Border(
           bottom: BorderSide(
             color: overlaps ? AppColors.border : Colors.transparent,
@@ -962,6 +982,15 @@ class _SearchHeader extends SliverPersistentHeaderDelegate {
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: Gaps.page - 8),
               children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: ActionChip(
+                    avatar: const Icon(Icons.view_agenda_outlined, size: 18),
+                    label: Text(groupLabel),
+                    onPressed: onGroup,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
                 for (final f in NodeFilter.values)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -982,7 +1011,10 @@ class _SearchHeader extends SliverPersistentHeaderDelegate {
 
   @override
   bool shouldRebuild(_SearchHeader old) =>
-      old.filter != filter || old.textScale != textScale;
+      old.filter != filter ||
+      old.textScale != textScale ||
+      old.groupLabel != groupLabel ||
+      old.bg != bg;
 }
 
 class _GroupHeader extends StatelessWidget {

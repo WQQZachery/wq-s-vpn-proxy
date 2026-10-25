@@ -132,6 +132,8 @@ void main() {
     nativeState = 'started';
     sink!.success({'type': 'state', 'state': 'started'});
     await t.pump(const Duration(milliseconds: 50));
+    await t.pump(const Duration(milliseconds: 280));
+    await expectLater(find.byType(HomeShell), matchesGoldenFile('out/06a_tint_wave.png'));
     final now = DateTime.now().millisecondsSinceEpoch;
     var rx = 0, tx = 0;
     for (var i = 0; i < 80; i++) {

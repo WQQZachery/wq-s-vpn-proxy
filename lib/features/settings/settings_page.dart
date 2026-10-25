@@ -8,8 +8,8 @@ import '../../app/theme.dart';
 import '../../core/models/models.dart';
 import '../../core/security/redact.dart';
 
-/// 必须与 pubspec.yaml 的 version 一致（当前 1.2.0+4）
-const appVersion = '1.2.0';
+/// 必须与 pubspec.yaml 的 version 一致（当前 1.2.1+5）
+const appVersion = '1.2.1';
 const appBrandName = "WQ's Proxy VPN";
 
 class SettingsPage extends ConsumerWidget {
@@ -177,6 +177,13 @@ class SettingsPage extends ConsumerWidget {
                   if (v != null && v.trim().isNotEmpty)
                     await n.updateEngine(e.copyWith(directDns: v.trim()));
                 },
+              ),
+              SwitchListTile(
+                title: const Text('进入节点页自动检测'),
+                subtitle: const Text('关闭时只在点击「检测全部」或单个节点的「检测」时才检测'),
+                value: ref.watch(settingsProvider).autoTestNodes,
+                onChanged: (v) =>
+                    ref.read(settingsProvider.notifier).setAutoTestNodes(v),
               ),
               SwitchListTile(
                 title: const Text('IPv6'),

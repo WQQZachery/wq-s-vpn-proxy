@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app/ripple_nav.dart';
+import 'app/vpn_tint.dart';
 import 'app/state.dart';
 import 'app/theme.dart';
 import 'core/storage/app_database.dart';
@@ -56,14 +57,16 @@ class HomeShell extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // 让 VPN 控制器尽早订阅原生事件
     ref.watch(vpnControllerProvider.select((s) => s.state));
-    return RippleNavShell(
-      destinations: destinations,
-      pageBuilder: (i, active) => switch (i) {
-        0 => const DashboardPage(),
-        1 => ProfilesPage(active: active),
-        2 => const DiagnosticsPage(),
-        _ => const SettingsPage(),
-      },
+    return VpnTintScope(
+      child: RippleNavShell(
+        destinations: destinations,
+        pageBuilder: (i, active) => switch (i) {
+          0 => const DashboardPage(),
+          1 => ProfilesPage(active: active),
+          2 => const DiagnosticsPage(),
+          _ => const SettingsPage(),
+        },
+      ),
     );
   }
 }

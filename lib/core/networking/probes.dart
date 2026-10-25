@@ -244,7 +244,7 @@ class NetworkProbes {
   }) async {
     final client = HttpClient()
       ..connectionTimeout = timeout
-      ..userAgent = 'WQsProxyVPN/1.2.0';
+      ..userAgent = 'WQsProxyVPN/1.2.1';
     final sw = Stopwatch()..start();
     try {
       final req = await client.getUrl(url).timeout(timeout);
