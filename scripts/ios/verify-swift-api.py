@@ -14,8 +14,11 @@
 """
 import re
 import sys
+from pathlib import Path
 
 HEADER = sys.argv[1] if len(sys.argv) > 1 else "/tmp/libbox_ios_h/src/gobind/Libbox.objc.h"
+# 仓库根目录由脚本位置推导（scripts/ios/ → repo/），CI 与本地均可运行
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def parse_header():
     text = open(HEADER, encoding="utf-8").read()
@@ -64,8 +67,8 @@ def main():
     protocols, structs, funcs, consts = parse_header()
     # ExtensionPlatformInterface.swift 实现 PlatformInterface + CommandServerHandler；
     # PacketTunnelProvider.swift 内嵌 StatusClientHandler 实现 CommandClientHandler
-    swift = open("/workspace/repo/ios/PacketTunnelProvider/ExtensionPlatformInterface.swift", encoding="utf-8").read()
-    swift += open("/workspace/repo/ios/PacketTunnelProvider/PacketTunnelProvider.swift", encoding="utf-8").read()
+    swift = open(REPO_ROOT / "ios/PacketTunnelProvider/ExtensionPlatformInterface.swift", encoding="utf-8").read()
+    swift += open(REPO_ROOT / "ios/PacketTunnelProvider/PacketTunnelProvider.swift", encoding="utf-8").read()
     swift_impl_funcs = set(re.findall(r"func (\w+)\(", swift))
 
     required = (protocols.get("LibboxPlatformInterface", [])

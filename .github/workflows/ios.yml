@@ -63,8 +63,16 @@ jobs:
 
       - name: Verify Swift API against generated header
         run: |
-          HEADER=$(find ios/Libbox.xcframework -name "Libbox.objc.h" -path "*ios-arm64/*" | head -1)
-          test -n "$HEADER"
+          HEADER=$(find ios/Libbox.xcframework -name "Libbox.objc.h" -path "*ios-arm64*" | head -1)
+          if [ -z "$HEADER" ]; then
+            HEADER=$(find ios/Libbox.xcframework -name "Libbox.objc.h" | head -1)
+          fi
+          if [ -z "$HEADER" ]; then
+            echo "ERROR: Libbox.objc.h not found in xcframework:" >&2
+            find ios/Libbox.xcframework -type f >&2 || true
+            exit 1
+          fi
+          echo "Verifying against: $HEADER"
           python3 scripts/ios/verify-swift-api.py "$HEADER"
 
       - name: flutter pub get
