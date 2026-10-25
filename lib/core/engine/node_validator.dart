@@ -64,7 +64,8 @@ class NodeValidator {
     if (!isValidHost(n.server)) e.add('服务器地址无效：${n.server}');
     if (n.port < 1 || n.port > 65535) e.add('端口超出范围：${n.port}');
     if (n.tls.insecure) {
-      e.add('该节点要求跳过 TLS 证书校验（insecure/allowInsecure），出于安全原因不允许运行');
+      // 不再拒绝：作为高风险节点单独标记，连接前须用户确认（见 node_risk.dart）
+      w.add('该节点跳过 TLS 证书校验（insecure），属于高风险节点，需确认后才能连接');
     }
     final needsTls =
         n.tls.enabled ||

@@ -50,6 +50,10 @@ class AppLog extends Notifier<List<String>> {
 final appLogProvider = NotifierProvider<AppLog, List<String>>(AppLog.new);
 
 // ---------------- 设置 ----------------
+/// 构建时注入：flutter build apk --dart-define=ABUSEIPDB_DEFAULT_KEY=...
+/// 不写入源码与仓库；未注入时为空，用户需自行填写。
+const kBuiltinAbuseKey = String.fromEnvironment('ABUSEIPDB_DEFAULT_KEY');
+
 class SettingsState {
   const SettingsState({
     this.engine = const EngineSettings(),
@@ -58,7 +62,25 @@ class SettingsState {
     this.cloudflareTarget = 'https://www.cloudflare.com/cdn-cgi/trace',
     this.claudeTarget = 'https://api.anthropic.com/v1/messages',
     this.autoTestNodes = false,
+    this.allowAllRisky = false,
+    this.riskAllowedIds = const {},
+    this.builtinAbuseKey = '',
   });
+
+  /// 允许所有风险节点直接连接（不再逐个确认）。默认关闭。
+  final bool allowAllRisky;
+
+  /// 用户确认过“风险连接”的节点。
+  final Set<String> riskAllowedIds;
+
+  /// 构建时通过 --dart-define=ABUSEIPDB_DEFAULT_KEY 注入的默认 Key（不在源码中）。
+  final String builtinAbuseKey;
+
+  /// 实际使用的 Key：用户自己填的优先，否则用内置默认。
+  String get effectiveAbuseKey =>
+      abuseIpDbKey.isNotEmpty ? abuseIpDbKey : builtinAbuseKey;
+  bool get usingBuiltinAbuseKey =>
+      abuseIpDbKey.isEmpty && builtinAbuseKey.isNotEmpty;
 
   /// 进入节点页时是否自动检测。默认关闭，由用户在设置中开启。
   final bool autoTestNodes;
@@ -75,7 +97,12 @@ class SettingsState {
     String? cloudflareTarget,
     String? claudeTarget,
     bool? autoTestNodes,
+    bool? allowAllRisky,
+    Set<String>? riskAllowedIds,
   }) => SettingsState(
+    allowAllRisky: allowAllRisky ?? this.allowAllRisky,
+    riskAllowedIds: riskAllowedIds ?? this.riskAllowedIds,
+    builtinAbuseKey: builtinAbuseKey,
     autoTestNodes: autoTestNodes ?? this.autoTestNodes,
     engine: engine ?? this.engine,
     retentionDays: retentionDays ?? this.retentionDays,
@@ -89,7 +116,7 @@ class SettingsNotifier extends Notifier<SettingsState> {
   @override
   SettingsState build() {
     unawaited(_load());
-    return const SettingsState();
+    return const SettingsState(builtinAbuseKey: kBuiltinAbuseKey);
   }
 
   AppDatabase get _db => ref.read(databaseProvider);
@@ -102,9 +129,16 @@ class SettingsNotifier extends Notifier<SettingsState> {
     final cf = await db.getKv('cfTarget');
     final claude = await db.getKv('claudeTarget');
     final auto = await db.getKv('autoTestNodes');
+    final allowAll = await db.getKv('allowAllRisky');
+    final allowed = await db.getKv('riskAllowedIds');
     if (!ref.mounted) return;
     state = SettingsState(
       autoTestNodes: auto == '1',
+      allowAllRisky: allowAll == '1',
+      riskAllowedIds: allowed == null || allowed.isEmpty
+          ? const {}
+          : ((jsonDecode(allowed) as List).cast<String>()).toSet(),
+      builtinAbuseKey: kBuiltinAbuseKey,
       engine: raw == null
           ? const EngineSettings()
           : EngineSettings.fromJson(
@@ -127,6 +161,18 @@ class SettingsNotifier extends Notifier<SettingsState> {
     state = state.copyWith(retentionDays: days);
     await _db.setKv('retentionDays', '$days');
     await _db.pruneProbes(Duration(days: days));
+  }
+
+  Future<void> setAllowAllRisky(bool v) async {
+    state = state.copyWith(allowAllRisky: v);
+    await _db.setKv('allowAllRisky', v ? '1' : '0');
+  }
+
+  Future<void> setRiskAllowed(String nodeId, bool allow) async {
+    final s = {...state.riskAllowedIds};
+    allow ? s.add(nodeId) : s.remove(nodeId);
+    state = state.copyWith(riskAllowedIds: s);
+    await _db.setKv('riskAllowedIds', jsonEncode(s.toList()));
   }
 
   Future<void> setAutoTestNodes(bool v) async {
@@ -271,6 +317,18 @@ class NodesNotifier extends Notifier<NodesState> {
     await reload();
   }
 
+  /// 批量删除（一键删除失效节点）。返回实际删除数量。
+  Future<int> deleteMany(Iterable<String> ids) async {
+    var n = 0;
+    for (final id in ids.toSet()) {
+      await _db.deleteNode(id);
+      n++;
+    }
+    await reload();
+    _log('已删除 $n 个节点');
+    return n;
+  }
+
   Future<void> duplicate(ProxyNode n) async {
     await _db.upsertNode(
       n.copyWith(
@@ -389,7 +447,7 @@ class NodesNotifier extends Notifier<NodesState> {
     _log('更新订阅「${s.name}」：${redactUrl(s.url)}');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
-      ..userAgent = 'WQsProxyVPN/1.2.1 (sing-box 1.14)';
+      ..userAgent = 'WQsProxyVPN/1.3.0 (sing-box 1.14)';
     try {
       final req = await client
           .getUrl(Uri.parse(s.url))
@@ -751,11 +809,14 @@ class VpnController extends Notifier<VpnStatus> {
     final secret = newId();
     final BuiltConfig built;
     try {
+      final st = ref.read(settingsProvider);
       built = ConfigBuilder.build(
         nodes: nodes.nodes,
         selected: sel,
         settings: settings,
         clashSecret: secret,
+        allowRisky: st.riskAllowedIds,
+        allowAllRisky: st.allowAllRisky,
       );
     } on ConfigBuildException catch (e) {
       return e.message;

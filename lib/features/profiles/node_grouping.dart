@@ -12,7 +12,8 @@ import '../../core/models/models.dart';
 enum NodeGroupMode {
   none('不分组'),
   source('按来源'),
-  protocol('按协议');
+  protocol('按协议'),
+  custom('自定义');
 
   const NodeGroupMode(this.label);
   final String label;
@@ -39,8 +40,72 @@ class NodeGroup {
 /// 手动添加 / 分享链接导入 / 无订阅归属的节点所在分组。
 const manualGroupKey = 'manual';
 
-String groupKeyOf(ProxyNode n, NodeGroupMode mode) => switch (mode) {
+/// 不属于任何自定义分组的节点。
+const ungroupedKey = 'cg:none';
+
+/// 用户自建分组。成员按节点的 dedupKey 记录，订阅刷新后节点 id 变化也不会丢失归属。
+/// 一个节点最多属于一个自定义分组。
+class CustomGroup {
+  const CustomGroup(this.id, this.name, [this.members = const {}]);
+  final String id;
+  final String name;
+  final Set<String> members;
+
+  bool contains(ProxyNode n) => members.contains(n.dedupKey);
+
+  CustomGroup copyWith({String? name, Set<String>? members}) =>
+      CustomGroup(id, name ?? this.name, members ?? this.members);
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'members': members.toList()..sort(),
+  };
+
+  static CustomGroup? fromJson(Object? o) {
+    if (o is! Map) return null;
+    final id = o['id'], name = o['name'];
+    if (id is! String || name is! String || id.isEmpty) return null;
+    return CustomGroup(
+      id,
+      name,
+      ((o['members'] as List?) ?? const []).whereType<String>().toSet(),
+    );
+  }
+}
+
+List<CustomGroup> decodeCustomGroups(String? raw) {
+  if (raw == null || raw.isEmpty) return const [];
+  try {
+    return [
+      for (final o in jsonDecode(raw) as List) ?CustomGroup.fromJson(o),
+    ];
+  } catch (_) {
+    return const [];
+  }
+}
+
+String encodeCustomGroups(List<CustomGroup> g) =>
+    jsonEncode([for (final x in g) x.toJson()]);
+
+CustomGroup? customGroupOf(ProxyNode n, List<CustomGroup> groups) {
+  final k = n.dedupKey;
+  for (final g in groups) {
+    if (g.members.contains(k)) return g;
+  }
+  return null;
+}
+
+String groupKeyOf(
+  ProxyNode n,
+  NodeGroupMode mode, [
+  List<CustomGroup> custom = const [],
+]) => switch (mode) {
   NodeGroupMode.none => 'all',
+  NodeGroupMode.custom => switch (customGroupOf(n, custom)) {
+    null => ungroupedKey,
+    final g => 'cg:${g.id}',
+  },
   NodeGroupMode.protocol => 'proto:${n.protocol.name}',
   NodeGroupMode.source =>
     (n.subscriptionId == null || n.subscriptionId!.isEmpty)
@@ -55,6 +120,7 @@ List<NodeGroup> groupNodes(
   required NodeGroupMode mode,
   NodeSortMode sort = NodeSortMode.original,
   List<Subscription> subscriptions = const [],
+  List<CustomGroup> customGroups = const [],
   int? Function(ProxyNode)? latencyOf,
 }) {
   final indexed = [for (var i = 0; i < nodes.length; i++) (i, nodes[i])];
@@ -83,7 +149,7 @@ List<NodeGroup> groupNodes(
 
   final buckets = <String, List<ProxyNode>>{};
   for (final n in out) {
-    (buckets[groupKeyOf(n, mode)] ??= []).add(n);
+    (buckets[groupKeyOf(n, mode, customGroups)] ??= []).add(n);
   }
 
   final order = <String>[];
@@ -95,6 +161,13 @@ List<NodeGroup> groupNodes(
       order.add('sub:${s.id}');
       titles['sub:${s.id}'] = s.name;
     }
+  } else if (mode == NodeGroupMode.custom) {
+    for (final g in customGroups) {
+      order.add('cg:${g.id}');
+      titles['cg:${g.id}'] = g.name;
+    }
+    order.add(ungroupedKey);
+    titles[ungroupedKey] = '未分组';
   } else {
     for (final p in ProxyProtocol.values) {
       order.add('proto:${p.name}');
@@ -191,4 +264,73 @@ class NodeGroupPrefsNotifier extends Notifier<NodeGroupPrefs> {
 final nodeGroupPrefsProvider =
     NotifierProvider<NodeGroupPrefsNotifier, NodeGroupPrefs>(
       NodeGroupPrefsNotifier.new,
+    );
+
+
+class CustomGroupsNotifier extends Notifier<List<CustomGroup>> {
+  static const kvKey = 'customGroups';
+
+  @override
+  List<CustomGroup> build() {
+    unawaited(_load());
+    return const [];
+  }
+
+  Future<void> _load() async {
+    final raw = await ref.read(databaseProvider).getKv(kvKey);
+    if (!ref.mounted) return;
+    state = decodeCustomGroups(raw);
+  }
+
+  Future<void> _save(List<CustomGroup> g) async {
+    state = g;
+    await ref.read(databaseProvider).setKv(kvKey, encodeCustomGroups(g));
+  }
+
+  /// 返回新分组 id；名称为空或重名时返回 null。
+  Future<String?> create(String name) async {
+    final n = name.trim();
+    if (n.isEmpty || state.any((g) => g.name == n)) return null;
+    final id = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    await _save([...state, CustomGroup(id, n)]);
+    return id;
+  }
+
+  Future<bool> rename(String id, String name) async {
+    final n = name.trim();
+    if (n.isEmpty || state.any((g) => g.name == n && g.id != id)) return false;
+    await _save([for (final g in state) g.id == id ? g.copyWith(name: n) : g]);
+    return true;
+  }
+
+  /// 只删除分组本身，节点不受影响（回到“未分组”）。
+  Future<void> remove(String id) =>
+      _save([for (final g in state) if (g.id != id) g]);
+
+  /// 把 [nodes] 移入分组 [id]（null = 移出所有分组）。一个节点只属于一个分组。
+  Future<void> assign(Iterable<ProxyNode> nodes, String? id) {
+    final keys = {for (final n in nodes) n.dedupKey};
+    return _save([
+      for (final g in state)
+        g.copyWith(
+          members: g.id == id
+              ? {...g.members, ...keys}
+              : g.members.difference(keys),
+        ),
+    ]);
+  }
+
+  /// 用勾选结果整体设置分组成员（勾掉的移出，勾上的从其他分组移过来）。
+  Future<void> setMembers(String id, Iterable<ProxyNode> nodes) {
+    final keys = {for (final n in nodes) n.dedupKey};
+    return _save([
+      for (final g in state)
+        g.copyWith(members: g.id == id ? keys : g.members.difference(keys)),
+    ]);
+  }
+}
+
+final customGroupsProvider =
+    NotifierProvider<CustomGroupsNotifier, List<CustomGroup>>(
+      CustomGroupsNotifier.new,
     );

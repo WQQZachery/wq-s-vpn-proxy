@@ -19,7 +19,8 @@
 flutter pub get
 bash scripts/build-libbox.sh          # 生成 android/app/libs/libbox.aar（约 20 MB）
 flutter test
-flutter build apk --release --target-platform android-arm64
+flutter build apk --release --target-platform android-arm64 \
+  --dart-define=ABUSEIPDB_DEFAULT_KEY="$(cat /path/to/abuseipdb.key)"   # 可选：内置默认 AbuseIPDB Key，不写入源码
 # 输出：build/app/outputs/flutter-apk/app-release.apk
 ```
 

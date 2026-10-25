@@ -11,6 +11,7 @@ import '../../app/vpn_tint.dart';
 import '../../core/engine/traffic_meter.dart';
 import '../../core/models/models.dart';
 import '../profiles/profiles_page.dart' show transportLabel;
+import '../profiles/node_tools.dart' show confirmRiskyConnect;
 import 'connect_orb.dart';
 import 'live_speed_chart.dart';
 
@@ -60,6 +61,10 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
         // 连接中再次轻点 = 取消连接
         await ctrl.disconnect();
       } else {
+        final sel = ref.read(nodesProvider).selected;
+        if (sel != null && !await confirmRiskyConnect(context, ref, sel)) {
+          return; // 用户取消风险连接
+        }
         final err = await ctrl.connect();
         if (err != null && mounted) setState(() => _localError = err);
       }

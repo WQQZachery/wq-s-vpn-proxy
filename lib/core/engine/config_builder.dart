@@ -4,6 +4,7 @@
 import 'dart:convert';
 
 import '../models/models.dart';
+import 'node_risk.dart';
 import 'node_validator.dart';
 import 'utls_fingerprint.dart';
 
@@ -93,6 +94,11 @@ class ConfigBuildException implements Exception {
   String toString() => message;
 }
 
+/// 所选节点为高风险（跳过证书校验），用户尚未确认。
+class RiskNotConfirmedException extends ConfigBuildException {
+  RiskNotConfirmedException() : super('所选节点存在高风险（跳过证书校验），需确认后才能连接');
+}
+
 class BuiltConfig {
   BuiltConfig(
     this.json,
@@ -132,15 +138,32 @@ class ConfigBuilder {
     required ProxyNode selected,
     required EngineSettings settings,
     required String clashSecret,
+    Set<String> allowRisky = const {},
+    bool allowAllRisky = false,
   }) {
     final warnings = <String>[];
     final valid = <ProxyNode>[];
+    // 高风险（跳过证书校验）节点只有在用户明确允许时才写入配置
+    bool admitted(ProxyNode n) =>
+        allowAllRisky || allowRisky.contains(n.id) || !assessRisk(n).high;
+    var skippedRisky = 0;
     for (final n in nodes.where((n) => n.enabled)) {
       final r = NodeValidator.validate(n);
-      if (r.ok) valid.add(n);
+      if (!r.ok) continue;
+      if (!admitted(n)) {
+        skippedRisky++;
+        continue;
+      }
+      valid.add(n);
+    }
+    if (skippedRisky > 0) {
+      warnings.add('$skippedRisky 个高风险节点未确认，未加入运行配置');
     }
     final sr = NodeValidator.validate(selected);
     if (!sr.ok) throw ConfigBuildException('所选节点未通过校验：${sr.errors.join('；')}');
+    if (!admitted(selected)) {
+      throw RiskNotConfirmedException();
+    }
     if (!valid.any((n) => n.id == selected.id)) valid.insert(0, selected);
     warnings.addAll(sr.warnings);
     for (final n in valid) {
@@ -366,6 +389,8 @@ class ConfigBuilder {
             ? n.tls.serverName
             : n.server,
         if (n.tls.alpn.isNotEmpty) 'alpn': n.tls.alpn,
+        // 只有用户确认风险后的节点才会走到这里（见 build 中的 admitted）
+        if (n.tls.insecure) 'insecure': true,
         // 指纹在这里做最后一道规范化：无论来自分享链接、订阅、JSON、手动编辑
         // 还是历史数据库，非法值都不会进入最终配置。
         if (fp.value != null)

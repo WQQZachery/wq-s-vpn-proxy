@@ -113,7 +113,7 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
   });
 
   Future<void> _reputationCheck() => _run('rep', () async {
-    final key = ref.read(settingsProvider).abuseIpDbKey;
+    final key = ref.read(settingsProvider).effectiveAbuseKey;
     final ip = _ip?.ip;
     if (ip == null) return;
     final sw = Stopwatch()..start();
@@ -192,7 +192,7 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
   Future<void> _ipAndReputation() async {
     await _exitIp();
     if (!mounted || _ip == null) return;
-    if (ref.read(settingsProvider).abuseIpDbKey.isEmpty) {
+    if (ref.read(settingsProvider).effectiveAbuseKey.isEmpty) {
       setState(() {
         _rep = null;
         _repError = ReputationException(
@@ -222,7 +222,7 @@ class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
   @override
   Widget build(BuildContext context) {
     final vpn = ref.watch(vpnControllerProvider);
-    final hasKey = ref.watch(settingsProvider.select((s) => s.abuseIpDbKey.isNotEmpty));
+    final hasKey = ref.watch(settingsProvider.select((s) => s.effectiveAbuseKey.isNotEmpty));
     final ipBusy = _running.contains('ip') || _running.contains('rep');
     return RefreshIndicator(
       onRefresh: _loadHistory,

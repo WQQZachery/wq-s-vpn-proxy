@@ -264,12 +264,12 @@ void main() {
         isTrue,
       ),
     );
-    test('拒绝跳过证书校验', () {
+    test('跳过证书校验：不再拒绝，标为高风险警告', () {
       final r = NodeValidator.validate(
         base(tls: const TlsOptions(enabled: true, insecure: true)),
       );
-      expect(r.ok, isFalse);
-      expect(r.errors.join(), contains('证书'));
+      expect(r.ok, isTrue);
+      expect(r.warnings.join(), contains('证书'));
     });
     test('SS 不支持的加密', () {
       expect(

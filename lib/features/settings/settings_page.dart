@@ -8,8 +8,8 @@ import '../../app/theme.dart';
 import '../../core/models/models.dart';
 import '../../core/security/redact.dart';
 
-/// 必须与 pubspec.yaml 的 version 一致（当前 1.2.1+5）
-const appVersion = '1.2.1';
+/// 必须与 pubspec.yaml 的 version 一致（当前 1.3.0+6）
+const appVersion = '1.3.0';
 const appBrandName = "WQ's Proxy VPN";
 
 class SettingsPage extends ConsumerWidget {
@@ -186,6 +186,15 @@ class SettingsPage extends ConsumerWidget {
                     ref.read(settingsProvider.notifier).setAutoTestNodes(v),
               ),
               SwitchListTile(
+                title: const Text('允许连接所有风险节点'),
+                subtitle: const Text(
+                  '关闭时，连接带「风险」标记的节点前会逐个提示确认。高风险节点（跳过证书校验）可能被中间人冒充服务器、窃取账号。',
+                ),
+                value: ref.watch(settingsProvider).allowAllRisky,
+                onChanged: (v) =>
+                    ref.read(settingsProvider.notifier).setAllowAllRisky(v),
+              ),
+              SwitchListTile(
                 title: const Text('IPv6'),
                 subtitle: const Text('TUN 分配 IPv6 地址并允许 IPv6 解析'),
                 value: e.enableIpv6,
@@ -214,9 +223,11 @@ class SettingsPage extends ConsumerWidget {
               ListTile(
                 title: const Text('AbuseIPDB API Key'),
                 subtitle: Text(
-                  st.abuseIpDbKey.isEmpty
-                      ? '未配置 · 用于查询出口 IP 信誉（可选）'
-                      : '已配置 · 保存在安全存储中',
+                  st.abuseIpDbKey.isNotEmpty
+                      ? '使用你自己的 Key · 保存在安全存储中'
+                      : st.usingBuiltinAbuseKey
+                      ? '使用内置默认 Key · 可填写自己的 Key 替换（留空恢复默认）'
+                      : '未配置 · 用于查询出口 IP 信誉（可选）',
                 ),
                 onTap: () async {
                   final v = await _edit(

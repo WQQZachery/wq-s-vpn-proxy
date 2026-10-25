@@ -162,7 +162,8 @@ class ProxyNode {
         .map((e) => '${e.key}=${e.value}')
         .join('&');
     return '${protocol.name}|${server.toLowerCase()}|$port|$s|$o|'
-        '${transport.type}|${transport.path ?? ''}|${tls.enabled}|${tls.serverName ?? ''}';
+        '${transport.type}|${transport.path ?? ''}|${tls.enabled}|${tls.serverName ?? ''}'
+        '${tls.isReality ? '|reality:${tls.realityPublicKey}:${tls.realityShortId ?? ''}' : ''}';
   }
 
   ProxyNode copyWith({

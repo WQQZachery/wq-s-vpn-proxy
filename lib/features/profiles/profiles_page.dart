@@ -19,12 +19,14 @@ import '../../core/networking/share_link_serializer.dart';
 import '../../app/vpn_tint.dart';
 import 'node_editor.dart';
 import 'node_grouping.dart';
+import 'node_tools.dart';
+import '../../core/engine/node_risk.dart';
 import 'qr_import.dart';
 
 /// 一个二维码（纠错级别 L、字节模式）可容纳约 2900 字节；留余量。
 const qrMaxChars = 2400;
 
-enum NodeFilter { all, enabled, healthy, failed, untested }
+enum NodeFilter { all, enabled, healthy, failed, untested, risky }
 
 /// 合并“本次检测”与“历史（缓存）”后，节点当前应显示的检测结论。
 class NodeLatencyView {
@@ -151,6 +153,7 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
       NodeFilter.healthy => v.ok,
       NodeFilter.failed => v.failed,
       NodeFilter.untested => v.status == null,
+      NodeFilter.risky => assessRisk(x).risky,
     };
   }
 
@@ -168,11 +171,13 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
     final vpn = ref.watch(vpnControllerProvider);
     final list = st.nodes.where((x) => _match(x, st)).toList();
     final prefs = ref.watch(nodeGroupPrefsProvider);
+    final custom = ref.watch(customGroupsProvider);
     final groups = groupNodes(
       list,
       mode: prefs.mode,
       sort: prefs.sort,
       subscriptions: st.subscriptions,
+      customGroups: custom,
       latencyOf: (n) {
         final v = NodeLatencyView.of(st, n.id);
         return v.ok ? v.ms : null;
@@ -214,6 +219,38 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
                     icon: const Icon(Icons.rss_feed_rounded),
                     onPressed: () => _subs(context),
                   ),
+                  PopupMenuButton<String>(
+                    tooltip: '更多',
+                    onSelected: (v) => switch (v) {
+                      'groups' => Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const CustomGroupsPage()),
+                      ),
+                      'delFailed' => deleteFailedNodes(
+                        context,
+                        ref,
+                        st.nodes.where((n) => NodeLatencyView.of(st, n.id).failed).toList(),
+                      ),
+                      _ => null,
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: 'groups',
+                        child: ListTile(
+                          leading: Icon(Icons.create_new_folder_outlined),
+                          title: Text('自定义分组'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'delFailed',
+                        child: ListTile(
+                          leading: Icon(Icons.delete_sweep_outlined, color: kBad),
+                          title: Text('一键删除失效节点'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -226,11 +263,9 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
               onCancel: busy > 0
                   ? () => ref.read(nodesProvider.notifier).cancelTests()
                   : null,
-              onRetestAll: busy > 0 || list.isEmpty
+              onRetestAll: busy > 0 || st.nodes.isEmpty
                   ? null
-                  : () => ref
-                        .read(nodesProvider.notifier)
-                        .testNodes(list.where((x) => x.enabled).toList()),
+                  : () => _pickAndTest(context, st, groups, prefs, custom),
             ),
           ),
           SliverPersistentHeader(
@@ -293,6 +328,11 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
                     onToggle: () => ref
                         .read(nodeGroupPrefsProvider.notifier)
                         .toggle(g.key),
+                    onTest: busy > 0 || !g.nodes.any((n) => n.enabled)
+                        ? null
+                        : () => ref.read(nodesProvider.notifier).testNodes(
+                            g.nodes.where((n) => n.enabled).toList(),
+                          ),
                   ),
                 ),
               if (prefs.mode == NodeGroupMode.none ||
@@ -322,6 +362,11 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
                             ? () => ref.read(nodesProvider.notifier).select(n.id)
                             : null,
                         onAction: (v) => _action(context, v, n),
+                        risk: assessRisk(n),
+                        riskAllowed: ref
+                            .watch(settingsProvider)
+                            .riskAllowedIds
+                            .contains(n.id),
                       );
                     },
                   ),
@@ -332,6 +377,33 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
         ],
       ),
     );
+  }
+
+  /// 检测前选择范围：全部 / 当前列表 / 当前分组方式下的各组 / 各自定义分组。
+  Future<void> _pickAndTest(
+    BuildContext context,
+    NodesState st,
+    List<NodeGroup> shownGroups,
+    NodeGroupPrefs prefs,
+    List<CustomGroup> custom,
+  ) async {
+    final scopes = <TestScope>[
+      TestScope('全部节点', st.nodes),
+      if (_q.isNotEmpty || _filter != NodeFilter.all)
+        TestScope('当前搜索 / 筛选结果', [for (final g in shownGroups) ...g.nodes]),
+      if (prefs.mode != NodeGroupMode.custom && prefs.mode != NodeGroupMode.none)
+        for (final g in groupNodes(
+          st.nodes,
+          mode: prefs.mode,
+          subscriptions: st.subscriptions,
+        ))
+          TestScope('${prefs.mode.label}：${g.title}', g.nodes),
+      for (final g in custom)
+        TestScope('分组：${g.name}', st.nodes.where(g.contains).toList()),
+    ];
+    final picked = await pickTestScope(context, scopes);
+    if (picked == null || picked.isEmpty || !mounted) return;
+    unawaited(ref.read(nodesProvider.notifier).testNodes(picked));
   }
 
   String? _subName(NodesState st, ProxyNode node) =>
@@ -358,6 +430,12 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
         await n.toggle(node);
       case 'export':
         await _exportNodes(context, [node]);
+      case 'group':
+        await moveNodeToGroup(context, ref, node);
+      case 'riskAllow':
+        await confirmRiskyConnect(context, ref, node);
+      case 'riskRevoke':
+        await ref.read(settingsProvider.notifier).setRiskAllowed(node.id, false);
       case 'del':
         final ok = await showDialog<bool>(
           context: context,
@@ -547,6 +625,18 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
                     onSelectionChanged: (v) => n.setSort(v.first),
                   ),
                   const SizedBox(height: 12),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(c);
+                      Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const CustomGroupsPage()),
+                      );
+                    },
+                    icon: const Icon(Icons.create_new_folder_outlined),
+                    label: const Text('管理自定义分组'),
+                  ),
+                  const SizedBox(height: 8),
                   Text(
                     '分组和排序只改变列表显示，不影响节点配置和连接。',
                     style: Theme.of(c).textTheme.bodySmall,
@@ -876,7 +966,7 @@ class _ProbeStatusBar extends StatelessWidget {
                     : TextButton.icon(
                         onPressed: onRetestAll,
                         icon: const Icon(Icons.refresh_rounded, size: 18),
-                        label: const Text('重测'),
+                        label: const Text('检测…'),
                       ),
               ),
             ],
@@ -943,6 +1033,7 @@ class _SearchHeader extends SliverPersistentHeaderDelegate {
     NodeFilter.healthy: '可用',
     NodeFilter.failed: '失败',
     NodeFilter.untested: '未检测',
+    NodeFilter.risky: '风险',
   };
 
   // 高度随系统字体缩放计算，避免大字体时溢出
@@ -1025,12 +1116,14 @@ class _GroupHeader extends StatelessWidget {
     required this.okCount,
     required this.collapsed,
     required this.onToggle,
+    this.onTest,
   });
   final String title;
   final int count;
   final int okCount;
   final bool collapsed;
   final VoidCallback onToggle;
+  final VoidCallback? onTest;
 
   @override
   Widget build(BuildContext context) {
@@ -1056,6 +1149,13 @@ class _GroupHeader extends StatelessWidget {
               Text(
                 okCount > 0 ? '$okCount/$count 可用' : '$count 个',
                 style: t.bodySmall?.copyWith(color: AppColors.textTertiary),
+              ),
+              IconButton(
+                tooltip: '检测本组',
+                visualDensity: VisualDensity.compact,
+                iconSize: 18,
+                onPressed: onTest,
+                icon: const Icon(Icons.network_ping_rounded),
               ),
               AnimatedRotation(
                 turns: collapsed ? -0.25 : 0,
@@ -1085,7 +1185,11 @@ class _NodeRow extends StatelessWidget {
     required this.subName,
     required this.onTap,
     required this.onAction,
+    this.risk = NodeRisk.safe,
+    this.riskAllowed = false,
   });
+  final NodeRisk risk;
+  final bool riskAllowed;
   final ProxyNode node;
   final bool first;
   final bool last;
@@ -1172,6 +1276,10 @@ class _NodeRow extends StatelessWidget {
                               const SizedBox(width: 6),
                               const StatusPill('已选', color: kAccent),
                             ],
+                            if (risk.risky) ...[
+                              const SizedBox(width: 6),
+                              RiskPill(risk),
+                            ],
                           ],
                         ),
                         const SizedBox(height: 2),
@@ -1226,6 +1334,12 @@ class _NodeRow extends StatelessWidget {
                           node.subscriptionId == null)
                         const PopupMenuItem(value: 'edit', child: Text('编辑')),
                       const PopupMenuItem(value: 'dup', child: Text('复制为手动节点')),
+                      const PopupMenuItem(value: 'group', child: Text('移到分组…')),
+                      if (risk.risky)
+                        PopupMenuItem(
+                          value: riskAllowed ? 'riskRevoke' : 'riskAllow',
+                          child: Text(riskAllowed ? '取消允许风险连接' : '允许风险连接…'),
+                        ),
                       if (ShareLinkSerializer.canExport(node))
                         const PopupMenuItem(value: 'export', child: Text('导出分享链接')),
                       PopupMenuItem(
