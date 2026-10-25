@@ -2,11 +2,14 @@
 // 节点页：标题、检测状态与搜索/筛选形成一个连续的头部区域，节点列表作为一个整体分组承接其下。
 // 进入页面即自动检测（调度、并发与冷却见 LatencyScheduler）。
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../app/state.dart';
 import '../../app/theme.dart';
@@ -14,6 +17,11 @@ import '../../core/engine/latency_tester.dart';
 import '../../core/models/models.dart';
 import '../../core/networking/share_link_serializer.dart';
 import 'node_editor.dart';
+import 'node_grouping.dart';
+import 'qr_import.dart';
+
+/// 一个二维码（纠错级别 L、字节模式）可容纳约 2900 字节；留余量。
+const qrMaxChars = 2400;
 
 enum NodeFilter { all, enabled, healthy, failed, untested }
 
@@ -153,6 +161,17 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
     final st = ref.watch(nodesProvider);
     final vpn = ref.watch(vpnControllerProvider);
     final list = st.nodes.where((x) => _match(x, st)).toList();
+    final prefs = ref.watch(nodeGroupPrefsProvider);
+    final groups = groupNodes(
+      list,
+      mode: prefs.mode,
+      sort: prefs.sort,
+      subscriptions: st.subscriptions,
+      latencyOf: (n) {
+        final v = NodeLatencyView.of(st, n.id);
+        return v.ok ? v.ms : null;
+      },
+    );
     final enabledCount = st.nodes.where((x) => x.enabled).length;
     final busy = st.latency.values.where((e) => e.busy).length;
     final doneThisRun = st.latency.values.where((e) => e.done).length;
@@ -172,10 +191,24 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
               subtitle: Text(
                 st.loading ? '加载中…' : '${st.nodes.length} 个节点 · $enabledCount 个已启用',
               ),
-              trailing: IconButton(
-                tooltip: '订阅管理',
-                icon: const Icon(Icons.rss_feed_rounded),
-                onPressed: () => _subs(context),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: '分组与排序',
+                    icon: Icon(
+                      prefs.mode == NodeGroupMode.none
+                          ? Icons.view_agenda_outlined
+                          : Icons.view_agenda_rounded,
+                    ),
+                    onPressed: () => _groupSheet(context),
+                  ),
+                  IconButton(
+                    tooltip: '订阅管理',
+                    icon: const Icon(Icons.rss_feed_rounded),
+                    onPressed: () => _subs(context),
+                  ),
+                ],
               ),
             ),
           ),
@@ -231,28 +264,57 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
                 message: '试试清空搜索词或切换筛选条件。',
               ),
             )
-          else
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Gaps.page - 4, 4, Gaps.page - 4, 96),
-              sliver: SliverList.builder(
-                itemCount: list.length,
-                itemBuilder: (c, i) => _NodeRow(
-                  key: ValueKey(list[i].id),
-                  node: list[i],
-                  first: i == 0,
-                  last: i == list.length - 1,
-                  selected: st.selectedId == list[i].id,
-                  inUse: st.selectedId == list[i].id &&
-                      vpn.state == VpnState.started,
-                  view: NodeLatencyView.of(st, list[i].id),
-                  subName: _subName(st, list[i]),
-                  onTap: list[i].enabled
-                      ? () => ref.read(nodesProvider.notifier).select(list[i].id)
-                      : null,
-                  onAction: (v) => _action(context, v, list[i]),
+          else ...[
+            for (final g in groups) ...[
+              if (prefs.mode != NodeGroupMode.none)
+                SliverToBoxAdapter(
+                  child: _GroupHeader(
+                    key: ValueKey('h-${g.key}'),
+                    title: g.title,
+                    count: g.nodes.length,
+                    okCount: g.nodes
+                        .where((n) => NodeLatencyView.of(st, n.id).ok)
+                        .length,
+                    collapsed: prefs.collapsed.contains(g.key),
+                    onToggle: () => ref
+                        .read(nodeGroupPrefsProvider.notifier)
+                        .toggle(g.key),
+                  ),
                 ),
-              ),
-            ),
+              if (prefs.mode == NodeGroupMode.none ||
+                  !prefs.collapsed.contains(g.key))
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Gaps.page - 4,
+                    4,
+                    Gaps.page - 4,
+                    8,
+                  ),
+                  sliver: SliverList.builder(
+                    itemCount: g.nodes.length,
+                    itemBuilder: (c, i) {
+                      final n = g.nodes[i];
+                      return _NodeRow(
+                        key: ValueKey(n.id),
+                        node: n,
+                        first: i == 0,
+                        last: i == g.nodes.length - 1,
+                        selected: st.selectedId == n.id,
+                        inUse: st.selectedId == n.id &&
+                            vpn.state == VpnState.started,
+                        view: NodeLatencyView.of(st, n.id),
+                        subName: _subName(st, n),
+                        onTap: n.enabled
+                            ? () => ref.read(nodesProvider.notifier).select(n.id)
+                            : null,
+                        onAction: (v) => _action(context, v, n),
+                      );
+                    },
+                  ),
+                ),
+            ],
+            const SliverToBoxAdapter(child: SizedBox(height: 88)),
+          ],
         ],
       ),
     );
@@ -304,51 +366,182 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
     }
   }
 
-  /// R2：导出节点。内容含凭据，复制前必须经过隐私确认。
+  /// R2：导出节点。内容含凭据，任何导出动作前都必须经过隐私确认。
   Future<void> _exportNodes(BuildContext context, List<ProxyNode> nodes) async {
     if (nodes.isEmpty) return;
-    final single = nodes.length == 1;
-    final fmt = await showDialog<String>(
+    final exportable = nodes.where(ShareLinkSerializer.canExport).toList();
+    final skipped = nodes.length - exportable.length;
+    if (exportable.isEmpty) {
+      showSnack(context, '没有可导出的节点（HTTP 代理没有通用分享链接格式）');
+      return;
+    }
+    final single = exportable.length == 1;
+    final links = ShareLinkSerializer.toLines(exportable).text;
+    final qrOk = utf8.encode(links).length <= qrMaxChars;
+    final action = await showModalBottomSheet<String>(
       context: context,
-      builder: (c) => AlertDialog(
-        title: Text(single ? '导出「${nodes.first.name}」' : '导出 ${nodes.length} 个节点'),
-        content: const Text(
-          '导出的链接包含服务器地址、UUID/密码和 REALITY 参数等完整凭据，'
-          '任何拿到它的人都能使用该节点。请只发给可信的人，不要贴到公开场合。\n\n'
-          '内容会复制到系统剪贴板，部分输入法或应用可以读取剪贴板，用完建议清空。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c),
-            child: const Text('取消'),
-          ),
-          if (!single)
-            TextButton(
-              onPressed: () => Navigator.pop(c, 'sub'),
-              child: const Text('复制为订阅(Base64)'),
+      builder: (c) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+              child: Text(
+                single
+                    ? '导出「${exportable.first.name}」'
+                    : '导出 ${exportable.length} 个节点'
+                          '${skipped > 0 ? '（跳过 $skipped 个 HTTP 节点）' : ''}',
+                style: Theme.of(c).textTheme.titleMedium,
+              ),
             ),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, 'links'),
-            child: const Text('复制分享链接'),
-          ),
-        ],
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
+              child: Text(
+                '导出内容包含服务器地址、UUID/密码和 REALITY 参数等完整凭据，'
+                '拿到它的人都能使用该节点。只发给可信的人，不要贴到公开场合；'
+                '剪贴板可能被输入法或其他应用读取，用完建议清空。',
+                style: TextStyle(fontSize: 12.5, color: AppColors.textSecondary),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_rounded),
+              title: const Text('复制分享链接'),
+              onTap: () => Navigator.pop(c, 'copy'),
+            ),
+            if (!single)
+              ListTile(
+                leading: const Icon(Icons.rss_feed_rounded),
+                title: const Text('复制为订阅内容（Base64）'),
+                onTap: () => Navigator.pop(c, 'sub'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.share_rounded),
+              title: const Text('系统分享'),
+              onTap: () => Navigator.pop(c, 'share'),
+            ),
+            ListTile(
+              enabled: qrOk,
+              leading: const Icon(Icons.qr_code_2_rounded),
+              title: const Text('显示二维码'),
+              subtitle: qrOk ? null : const Text('内容过长，无法放进一个二维码，请减少节点数量'),
+              onTap: () => Navigator.pop(c, 'qr'),
+            ),
+          ],
+        ),
       ),
     );
-    if (fmt == null) return;
-    final r = fmt == 'sub'
-        ? ShareLinkSerializer.toSubscription(nodes)
-        : ShareLinkSerializer.toLines(nodes);
-    final exported = nodes.length - r.skipped.length;
-    if (exported > 0) await Clipboard.setData(ClipboardData(text: r.text));
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          exported == 0
-              ? '没有可导出的节点（HTTP 代理没有通用分享链接格式）'
-              : '已复制 $exported 个节点'
-                    '${r.skipped.isEmpty ? '' : '，跳过 ${r.skipped.length} 个 HTTP 节点'}',
-        ),
+    if (action == null || !context.mounted) return;
+    switch (action) {
+      case 'copy':
+      case 'sub':
+        final text = action == 'sub'
+            ? ShareLinkSerializer.toSubscription(exportable).text
+            : links;
+        await Clipboard.setData(ClipboardData(text: text));
+        if (context.mounted) showSnack(context, '已复制 ${exportable.length} 个节点');
+      case 'share':
+        await SharePlus.instance.share(
+          ShareParams(
+            text: links,
+            subject: single ? exportable.first.name : 'WQ\'s Proxy VPN 节点',
+          ),
+        );
+      case 'qr':
+        await showDialog<void>(
+          context: context,
+          builder: (c) => AlertDialog(
+            title: Text(single ? exportable.first.name : '${exportable.length} 个节点'),
+            content: SizedBox(
+              width: 260,
+              height: 260,
+              child: ColoredBox(
+                color: Colors.white,
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: QrImageView(
+                    data: links,
+                    errorCorrectionLevel: QrErrorCorrectLevel.L,
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(c),
+                child: const Text('关闭'),
+              ),
+            ],
+          ),
+        );
+    }
+  }
+
+  Future<void> _importQr(BuildContext context, {required bool gallery}) async {
+    final QrPayload? p = gallery
+        ? await pickQrFromGallery(context)
+        : await Navigator.of(context).push<QrPayload>(
+            MaterialPageRoute(builder: (_) => const QrScanPage()),
+          );
+    if (p == null || !context.mounted) return;
+    switch (p.kind) {
+      case QrPayloadKind.unknown:
+        showSnack(context, '没有识别到节点或订阅二维码');
+      case QrPayloadKind.subscriptionUrl:
+        await _addSubDialog(context, initialUrl: p.text);
+      case QrPayloadKind.nodes:
+        final r = await ref.read(nodesProvider.notifier).importText(p.text);
+        if (context.mounted) _showOutcome(context, r);
+    }
+  }
+
+  void _groupSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (c) => Consumer(
+        builder: (c, ref, _) {
+          final p = ref.watch(nodeGroupPrefsProvider);
+          final n = ref.read(nodeGroupPrefsProvider.notifier);
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('分组', style: Theme.of(c).textTheme.titleSmall),
+                  const SizedBox(height: 8),
+                  SegmentedButton<NodeGroupMode>(
+                    showSelectedIcon: false,
+                    segments: [
+                      for (final m in NodeGroupMode.values)
+                        ButtonSegment(value: m, label: Text(m.label)),
+                    ],
+                    selected: {p.mode},
+                    onSelectionChanged: (v) => n.setMode(v.first),
+                  ),
+                  const SizedBox(height: 16),
+                  Text('排序', style: Theme.of(c).textTheme.titleSmall),
+                  const SizedBox(height: 8),
+                  SegmentedButton<NodeSortMode>(
+                    showSelectedIcon: false,
+                    segments: [
+                      for (final m in NodeSortMode.values)
+                        ButtonSegment(value: m, label: Text(m.label)),
+                    ],
+                    selected: {p.sort},
+                    onSelectionChanged: (v) => n.setSort(v.first),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    '分组和排序只改变列表显示，不影响节点配置和连接。',
+                    style: Theme.of(c).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -377,6 +570,23 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
               onTap: () {
                 Navigator.pop(c);
                 _importDialog(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.qr_code_scanner_rounded),
+              title: const Text('扫码导入'),
+              subtitle: const Text('节点二维码或订阅二维码'),
+              onTap: () {
+                Navigator.pop(c);
+                _importQr(context, gallery: false);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('从相册图片识别'),
+              onTap: () {
+                Navigator.pop(c);
+                _importQr(context, gallery: true);
               },
             ),
             ListTile(
@@ -472,9 +682,9 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
     );
   }
 
-  Future<void> _addSubDialog(BuildContext context) async {
+  Future<void> _addSubDialog(BuildContext context, {String? initialUrl}) async {
     final name = TextEditingController();
-    final url = TextEditingController();
+    final url = TextEditingController(text: initialUrl ?? '');
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -773,6 +983,62 @@ class _SearchHeader extends SliverPersistentHeaderDelegate {
   @override
   bool shouldRebuild(_SearchHeader old) =>
       old.filter != filter || old.textScale != textScale;
+}
+
+class _GroupHeader extends StatelessWidget {
+  const _GroupHeader({
+    super.key,
+    required this.title,
+    required this.count,
+    required this.okCount,
+    required this.collapsed,
+    required this.onToggle,
+  });
+  final String title;
+  final int count;
+  final int okCount;
+  final bool collapsed;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    return Semantics(
+      button: true,
+      expanded: !collapsed,
+      label: '$title，$count 个节点',
+      child: InkWell(
+        onTap: onToggle,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(Gaps.page, 12, Gaps.page - 4, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: t.titleSmall,
+                ),
+              ),
+              Text(
+                okCount > 0 ? '$okCount/$count 可用' : '$count 个',
+                style: t.bodySmall?.copyWith(color: AppColors.textTertiary),
+              ),
+              AnimatedRotation(
+                turns: collapsed ? -0.25 : 0,
+                duration: Motion.of(context, Motion.fast),
+                child: const Icon(
+                  Icons.expand_more_rounded,
+                  color: AppColors.textTertiary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _NodeRow extends StatelessWidget {

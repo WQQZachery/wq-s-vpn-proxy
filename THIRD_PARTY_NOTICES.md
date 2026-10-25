@@ -34,3 +34,7 @@ api.ip.sb、ipinfo.io（出口 IP）、api.abuseipdb.com（IP 信誉，需用户
 ## 未包含
 
 Naive（需 cronet）、Tailscale、USB/IP、OpenVPN、OpenConnect 未编入 libbox，界面不提供这些协议。不包含 GeoIP/GeoSite 数据库。
+
+## 1.2.0 新增依赖
+- share_plus（BSD-3-Clause）、qr_flutter（BSD-3-Clause）、image_picker（Apache-2.0/BSD-3-Clause）
+- mobile_scanner（BSD-3-Clause），内含 Google ML Kit Barcode Scanning（Google ML Kit Terms，专有）与 CameraX（Apache-2.0）。ML Kit 许可与 GPL 分发的兼容性待确认，见 docs/FEATURES_1.2.0.md。

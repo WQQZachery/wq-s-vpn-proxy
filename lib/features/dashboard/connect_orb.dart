@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // VPN 连接按钮动效。动画完全由真实 VPN 状态（原生层上报）驱动：
 //   未连接  → 灰色静止圆环
-//   准备/连接中 → 主色弧线旋转（未收到 started 事件前不会出现任何“成功”效果）
+//   准备/连接中 → 主色弧线旋转 + 向外扩散的等待波纹（未收到 started 事件前不会出现任何“成功”效果）
 //   已连接  → 绿色完整圆环 + 一次性扩散波纹 + 缓慢呼吸光晕
 //   断开中  → 弧线反向旋转并逐渐褪色
 //   错误    → 红色圆环 + 一次轻微抖动
@@ -184,6 +184,7 @@ class _ConnectOrbState extends State<ConnectOrb> with TickerProviderStateMixin {
                             ? _burst.value
                             : 1,
                         orbRadius: widget.size / 2,
+                        reduced: _reduced,
                       ),
                       child: Center(
                         child: SwapSwitcher(
@@ -226,7 +227,9 @@ class _OrbPainter extends CustomPainter {
     required this.pulse,
     required this.burst,
     required this.orbRadius,
+    this.reduced = false,
   });
+  final bool reduced;
   final Color color;
   final OrbPhase phase;
   final double spin;
@@ -254,6 +257,25 @@ class _OrbPainter extends CustomPainter {
             stops: [r / glowR, 1],
           ).createShader(Rect.fromCircle(center: c, radius: glowR)),
       );
+    }
+
+    // 连接中等待波纹：两道错开半个周期的圆环由内向外扩散。
+    // 复用旋转控制器的进度（只在真实的 preparing/connecting 阶段运行），
+    // 不额外占用 Ticker；减少动态效果时不绘制。
+    if (!reduced &&
+        (phase == OrbPhase.preparing || phase == OrbPhase.connecting)) {
+      for (final offset in const [0.0, 0.5]) {
+        final t = (spin + offset) % 1.0;
+        final e = Curves.easeOut.transform(t);
+        canvas.drawCircle(
+          c,
+          r + 4 + 22 * e,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5
+            ..color = color.withValues(alpha: 0.28 * (1 - e)),
+        );
+      }
     }
 
     // 一次性成功波纹
@@ -340,5 +362,6 @@ class _OrbPainter extends CustomPainter {
       o.spin != spin ||
       o.pulse != pulse ||
       o.burst != burst ||
-      o.orbRadius != orbRadius;
+      o.orbRadius != orbRadius ||
+      o.reduced != reduced;
 }

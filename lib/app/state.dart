@@ -376,7 +376,7 @@ class NodesNotifier extends Notifier<NodesState> {
     _log('更新订阅「${s.name}」：${redactUrl(s.url)}');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
-      ..userAgent = 'WQsProxyVPN/1.1.1 (sing-box 1.14)';
+      ..userAgent = 'WQsProxyVPN/1.2.0 (sing-box 1.14)';
     try {
       final req = await client
           .getUrl(Uri.parse(s.url))
@@ -572,8 +572,14 @@ class VpnStatus {
 }
 
 class VpnController extends Notifier<VpnStatus> {
+  /// 发出启动请求后，内核在此时间内仍未上报 started 视为连接超时。
+  /// 测试中可调小。
+  static Duration startTimeout = const Duration(seconds: 30);
+
   final meter = TrafficMeter(maxSamples: 160);
   StreamSubscription<EngineEvent>? _sub;
+  Timer? _startTimer;
+  bool _timedOut = false;
 
   @override
   VpnStatus build() {
@@ -582,7 +588,10 @@ class VpnController extends Notifier<VpnStatus> {
       _onEvent,
       onError: (Object e) => _log('事件通道错误：$e'),
     );
-    ref.onDispose(() => _sub?.cancel());
+    ref.onDispose(() {
+      _sub?.cancel();
+      _startTimer?.cancel();
+    });
     unawaited(
       engine
           .currentState()
@@ -603,6 +612,18 @@ class VpnController extends Notifier<VpnStatus> {
     if (e.state != null) {
       final s = e.state!;
       _log('VPN 状态：${s.name}${e.message != null ? '（${e.message}）' : ''}');
+      if (s != VpnState.starting) _startTimer?.cancel();
+      if (_timedOut && (s == VpnState.stopped || s == VpnState.error)) {
+        // 超时后由我们主动停止：最终状态保留“连接超时”，而不是普通的“已断开”
+        _timedOut = false;
+        state = VpnStatus(
+          state: VpnState.error,
+          message:
+              '连接超时：内核 ${startTimeout.inSeconds} 秒内未就绪，已停止。请检查节点或网络后重试',
+        );
+        return;
+      }
+      if (s == VpnState.started) _timedOut = false;
       final wasStarted = state.state == VpnState.started;
       if ((s == VpnState.started) != wasStarted) {
         // 检测层级随 VPN 开关而变（TCP ↔ 经代理），旧的本次检测结果作废
@@ -686,9 +707,18 @@ class VpnController extends Notifier<VpnStatus> {
       clash: ClashApiClient(port: settings.clashApiPort, secret: secret),
       mode: settings.routeMode,
     );
+    _timedOut = false;
+    _startTimer?.cancel();
+    _startTimer = Timer(startTimeout, () {
+      if (!ref.mounted || state.state != VpnState.starting) return;
+      _timedOut = true;
+      _log('连接超时（${startTimeout.inSeconds} 秒未就绪），停止内核');
+      unawaited(engine.stop());
+    });
     try {
       await engine.start(config: built.json, profileName: sel.name);
     } catch (e) {
+      _startTimer?.cancel();
       final err = built.annotateError('$e');
       state = VpnStatus(state: VpnState.error, message: redact(err));
       return '启动失败：${redact(err)}';

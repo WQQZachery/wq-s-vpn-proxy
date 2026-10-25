@@ -197,7 +197,7 @@ class SpeedTestConfig {
 }
 
 const _ndtProtocol = 'net.measurementlab.ndt.v7';
-const _userAgent = 'WQsProxyVPN/1.1.1 speedtest';
+const _userAgent = 'WQsProxyVPN/1.2.0 speedtest';
 
 /// 一次测速会话。调用 [run] 开始，[cancel] 取消；进度通过 [progress] 推送。
 class SpeedTestSession {

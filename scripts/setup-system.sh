@@ -45,6 +45,7 @@ for d in /workspace/tools/android-sdk/cmake/*/bin; do
   done
 done
 ${SUDO:-sudo} apt-get install -y libsqlite3-dev >/dev/null  # 单元测试用 sqflite_common_ffi（pubspec hooks: sqlite3 source=system）
+[ -e /usr/lib/aarch64-linux-gnu/libsqlite3.so ] || ${SUDO:-sudo} ln -sf /usr/lib/aarch64-linux-gnu/libsqlite3.so.0 /usr/lib/aarch64-linux-gnu/libsqlite3.so  # 兜底：-dev 包装不上时
 
 # 固定 debug 签名：根分区/家目录重置后恢复同一 debug.keystore，保证 APK 可覆盖安装（自 1.1.1 起）
 if [ -f /workspace/tools/signing/debug.keystore ]; then
