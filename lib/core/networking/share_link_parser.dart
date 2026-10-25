@@ -321,7 +321,7 @@ class ShareLinkParser {
             ? s('sni')
             : (s('host').isNotEmpty ? s('host') : null),
         alpn: s('alpn').isEmpty ? const [] : s('alpn').split(','),
-        fingerprint: s('fp').isEmpty ? null : s('fp'),
+        fingerprint: sanitizeUtlsFingerprint(s('fp')),
       ),
       transport: _transport(
         net,
@@ -399,7 +399,7 @@ class ShareLinkParser {
         serverName: q['sni'] ?? q['peer'],
         insecure: q['allowInsecure'] == '1' || q['insecure'] == '1',
         alpn: (q['alpn'] ?? '').isEmpty ? const [] : q['alpn']!.split(','),
-        fingerprint: q['fp'],
+        fingerprint: sanitizeUtlsFingerprint(q['fp']),
         realityPublicKey: reality ? q['pbk'] : null,
         realityShortId: reality ? (q['sid'] ?? '') : null,
       ),
@@ -429,7 +429,7 @@ class ShareLinkParser {
         serverName: q['sni'] ?? q['peer'],
         insecure: q['allowInsecure'] == '1',
         alpn: (q['alpn'] ?? '').isEmpty ? const [] : q['alpn']!.split(','),
-        fingerprint: q['fp'],
+        fingerprint: sanitizeUtlsFingerprint(q['fp']),
       ),
       transport: _transport(
         q['type'] ?? 'tcp',
@@ -584,7 +584,7 @@ class ShareLinkParser {
       serverName: tlsJ?['server_name'] as String?,
       insecure: tlsJ?['insecure'] == true,
       alpn: ((tlsJ?['alpn'] as List?) ?? const []).map((e) => '$e').toList(),
-      fingerprint: utls?['fingerprint'] as String?,
+      fingerprint: sanitizeUtlsFingerprint(utls?['fingerprint'] as String?),
       realityPublicKey: reality?['enabled'] == true
           ? reality!['public_key'] as String?
           : null,

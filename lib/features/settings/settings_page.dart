@@ -15,6 +15,50 @@ const appBrandName = "WQ's Proxy VPN";
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
 
+  /// 节点检测档位选择（快速/标准/精确）。
+  Future<void> _pickTestProfile(
+    BuildContext context,
+    TestProfile current,
+    SettingsNotifier n,
+  ) async {
+    final picked = await showModalBottomSheet<TestProfile>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '节点检测档位',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+            for (final p in TestProfile.values)
+              ListTile(
+                leading: Icon(
+                  p == current
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                  color: p == current ? kAccent : null,
+                ),
+                title: Text('${p.label} · 并发 ${p.concurrency} · 超时 ${p.timeoutSec}s'),
+                subtitle: Text(p.description),
+                onTap: () => Navigator.pop(ctx, p),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (picked != null && picked != current) {
+      await n.setTestProfile(picked);
+    }
+  }
+
   Future<String?> _edit(
     BuildContext context,
     String title,
@@ -191,6 +235,29 @@ class SettingsPage extends ConsumerWidget {
                 ),
                 value: e.strictRoute,
                 onChanged: (v) => n.updateEngine(e.copyWith(strictRoute: v)),
+              ),
+            ],
+          ),
+        ),
+        const SectionTitle('节点检测'),
+        Card(
+          child: Column(
+            children: [
+              ListTile(
+                title: const Text('检测档位'),
+                subtitle: Text(
+                  '${st.testProfile.label} · 并发 ${st.testProfile.concurrency} · 超时 ${st.testProfile.timeoutSec}s · ${st.testProfile.description}',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _pickTestProfile(context, st.testProfile, n),
+              ),
+              const ListTile(
+                title: Text('说明'),
+                subtitle: Text(
+                  '进入节点页会自动检测已启用节点；“重测”会立即按当前档位全部重跑。'
+                  'VPN 未连接时只能检测 TCP 端口可达（对普通 TLS 节点附带一次证书校验的 TLS 握手），'
+                  '连接 VPN 后自动改为经 sing-box 内核的真实代理延迟。',
+                ),
               ),
             ],
           ),

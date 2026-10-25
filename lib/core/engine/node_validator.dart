@@ -67,6 +67,15 @@ class NodeValidator {
     }
     if (!transports.contains(n.transport.type))
       e.add('不支持的传输：${n.transport.type}');
+    final fp = n.tls.fingerprint;
+    if (fp != null &&
+        fp.isNotEmpty &&
+        sanitizeUtlsFingerprint(fp) == null) {
+      w.add(
+        'uTLS 指纹「$fp」不被 sing-box 支持，连接时将改用默认 chrome 指纹'
+        '（其他客户端的 fp=unsafe 等约定值请留空）',
+      );
+    }
     String sec(String k) => n.secret[k] ?? '';
     switch (n.protocol) {
       case ProxyProtocol.shadowsocks:

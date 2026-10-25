@@ -90,6 +90,46 @@ void main() {
   });
 
   group('节点延迟调度', () {
+    test('检测档位：TestProfile 参数与 fromName 容错', () {
+      expect(TestProfile.quick.concurrency, 16);
+      expect(TestProfile.standard.concurrency, 8);
+      expect(TestProfile.accurate.concurrency, 4);
+      expect(
+        TestProfile.quick.timeoutSec,
+        lessThan(TestProfile.accurate.timeoutSec),
+      );
+      expect(TestProfile.fromName('quick'), TestProfile.quick);
+      expect(TestProfile.fromName('accurate'), TestProfile.accurate);
+      expect(TestProfile.fromName(''), TestProfile.standard);
+      expect(TestProfile.fromName('bogus'), TestProfile.standard);
+      expect(TestProfile.fromName(null), TestProfile.standard);
+    });
+
+    test('运行时提高并发上限对下一批检测立即生效', () async {
+      var active = 0, peak = 0;
+      final s = LatencyScheduler(
+        concurrency: 2,
+        stagger: Duration.zero,
+        onChange: (_) {},
+        probe: (id) async {
+          active++;
+          peak = math.max(peak, active);
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          active--;
+          return const ProbeOutcome.ok(10, LatencyLayer.proxy);
+        },
+      );
+      s.enqueue([for (var i = 1; i <= 10; i++) '$i']);
+      await s.whenIdle();
+      expect(peak, lessThanOrEqualTo(2));
+      // 切换到“快速”档：并发上限 16，10 个节点应全部同时在场。
+      peak = 0;
+      s.concurrency = 16;
+      s.enqueue([for (var i = 1; i <= 10; i++) 'b$i']);
+      await s.whenIdle();
+      expect(peak, 10);
+    });
+
     test('并发上限与结果按节点 id 对应', () async {
       var active = 0, peak = 0;
       final rnd = math.Random(1);

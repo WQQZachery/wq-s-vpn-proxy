@@ -183,6 +183,7 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
               viaProxy: vpn.state == VpnState.started,
               busy: busy,
               done: doneThisRun,
+              concurrency: ref.watch(settingsProvider).testProfile.concurrency,
               onCancel: busy > 0
                   ? () => ref.read(nodesProvider.notifier).cancelTests()
                   : null,
@@ -536,12 +537,16 @@ class _ProbeStatusBar extends StatelessWidget {
     required this.viaProxy,
     required this.busy,
     required this.done,
+    required this.concurrency,
     this.onCancel,
     this.onRetestAll,
   });
   final bool viaProxy;
   final int busy;
   final int done;
+
+  /// 当前检测档位的并发上限（见 TestProfile）。
+  final int concurrency;
   final VoidCallback? onCancel;
   final VoidCallback? onRetestAll;
 
@@ -612,7 +617,7 @@ class _ProbeStatusBar extends StatelessWidget {
                   ),
                   const SizedBox(width: 10),
                   Text(
-                    '检测中 $done/$total · 并发 4',
+                    '检测中 $done/$total · 并发 $concurrency',
                     style: const TextStyle(
                       fontSize: 11,
                       color: AppColors.textTertiary,

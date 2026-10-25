@@ -294,4 +294,70 @@ void main() {
       expect(NodeValidator.validate(n).ok, isFalse);
     });
   });
+
+  group('uTLS 指纹白名单（fp=unsafe 修复回归）', () {
+    // 背景：部分订阅/分享链接带 fp=unsafe（其他客户端“跳过证书校验”的约定值），
+    // sing-box 不识别该指纹名，原样写入会导致整份配置校验失败、换任何节点都连不上。
+    const uuid2 = 'b831381d-6324-4d53-ad4f-8cda48b30811';
+    test('fp=unsafe 在导入时被丢弃', () {
+      final n = parser.parseLink(
+        'vless://$uuid2@a.example.com:443?security=tls&sni=a.example.com&fp=unsafe#X',
+      );
+      expect(n.tls.fingerprint, isNull);
+    });
+    test('fp=chrome 原样保留', () {
+      final n = parser.parseLink(
+        'vless://$uuid2@a.example.com:443?security=tls&fp=chrome#X',
+      );
+      expect(n.tls.fingerprint, 'chrome');
+    });
+    test('大小写与空白被规整（Firefox → firefox）', () {
+      final n = parser.parseLink(
+        'vless://$uuid2@a.example.com:443?security=tls&fp=%20Firefox%20#X',
+      );
+      expect(n.tls.fingerprint, 'firefox');
+    });
+    test('合法新值 randomized 保留', () {
+      final n = parser.parseLink(
+        'vless://$uuid2@a.example.com:443?security=tls&fp=randomized#X',
+      );
+      expect(n.tls.fingerprint, 'randomized');
+    });
+    test('sanitizeUtlsFingerprint 白名单行为', () {
+      expect(sanitizeUtlsFingerprint(null), isNull);
+      expect(sanitizeUtlsFingerprint(''), isNull);
+      expect(sanitizeUtlsFingerprint('  '), isNull);
+      expect(sanitizeUtlsFingerprint('unsafe'), isNull);
+      expect(sanitizeUtlsFingerprint('allowInsecure'), isNull);
+      expect(sanitizeUtlsFingerprint('Chrome'), 'chrome');
+      expect(sanitizeUtlsFingerprint('safari'), 'safari');
+    });
+    test('healUtlsFingerprint 自愈：非法值清除、合法值原样返回', () {
+      final base = ProxyNode(
+        id: 'x',
+        name: 'v',
+        protocol: ProxyProtocol.vless,
+        server: 'a.com',
+        port: 443,
+        secret: const {'uuid': uuid2},
+        tls: const TlsOptions(enabled: true, fingerprint: 'unsafe'),
+      );
+      final healed = healUtlsFingerprint(base);
+      expect(healed.tls.fingerprint, isNull);
+      expect(healed.tls.enabled, isTrue);
+
+      final ok = base.copyWith(
+        tls: const TlsOptions(enabled: true, fingerprint: 'chrome'),
+      );
+      expect(identical(healUtlsFingerprint(ok), ok), isTrue);
+    });
+    test('REALITY 节点 fp=unsafe 导入后无指纹（内核侧回退 chrome）', () {
+      final n = parser.parseLink(
+        'vless://$uuid2@a.example.com:443?security=reality&sni=www.apple.com'
+        '&pbk=Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw&sid=6ba85179e30d4fc2&fp=unsafe#R',
+      );
+      expect(n.tls.isReality, isTrue);
+      expect(n.tls.fingerprint, isNull);
+    });
+  });
 }

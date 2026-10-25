@@ -168,6 +168,118 @@ void main() {
     }
   });
 
+  group('uTLS 指纹白名单（fp=unsafe 修复回归）', () {
+    // 复现用户实际故障：订阅节点带 fp=unsafe → 原样写入 sing-box →
+    // "initialize outbound[xx]: unknown uTLS fingerprint: unsafe" →
+    // 整份配置校验失败，换任何节点都无法连接。
+    ProxyNode dirty({String? fp, String name = 'Dirty'}) => ProxyNode(
+      id: 'dirty-${name.hashCode}',
+      name: name,
+      protocol: ProxyProtocol.vless,
+      server: 'd.example.com',
+      port: 443,
+      secret: const {'uuid': 'b831381d-6324-4d53-ad4f-8cda48b30811'},
+      tls: TlsOptions(enabled: true, serverName: 'd.example.com', fingerprint: fp),
+    );
+
+    /// 按节点 id 找到其对应 outbound（outbounds[0] 是 selector，没有 tls）。
+    Map<String, dynamic> outboundOf(
+      Map<String, dynamic> j,
+      String nodeId,
+      Map<String, String> nodeTags,
+    ) {
+      final tag = nodeTags[nodeId]!;
+      final outs = (j['outbounds'] as List).cast<Map<String, dynamic>>();
+      return outs.firstWhere((o) => o['tag'] == tag);
+    }
+
+    BuiltConfig buildWith(List<ProxyNode> ns, ProxyNode sel) =>
+        ConfigBuilder.build(
+          nodes: ns,
+          selected: sel,
+          settings: const EngineSettings(),
+          clashSecret: 'x',
+        );
+
+    test('库中旧数据 fingerprint=unsafe 被净化：不写入 utls', () {
+      final d = dirty(fp: 'unsafe');
+      final b = buildWith([...nodes, d], d);
+      final j = jsonDecode(b.json) as Map<String, dynamic>;
+      final outs = (j['outbounds'] as List).cast<Map<String, dynamic>>();
+      for (final o in outs) {
+        final utls = (o['tls'] as Map?)?['utls'] as Map?;
+        if (utls != null) {
+          expect(
+            utls['fingerprint'],
+            isNot('unsafe'),
+            reason: '任何 outbound 都不得携带 sing-box 不认识的指纹',
+          );
+        }
+      }
+    });
+
+    test('合法 fingerprint=firefox 原样写入', () {
+      final d = dirty(fp: 'firefox');
+      final b = buildWith([d], d);
+      final j = jsonDecode(b.json) as Map<String, dynamic>;
+      final o = outboundOf(j, d.id, b.nodeTags);
+      final utls = (o['tls'] as Map)['utls'] as Map;
+      expect(utls['fingerprint'], 'firefox');
+    });
+
+    test('REALITY + fingerprint=unsafe：utls 回退 chrome（而非 unsafe）', () {
+      final d = ProxyNode(
+        id: 'dirty-reality',
+        name: 'DirtyReality',
+        protocol: ProxyProtocol.vless,
+        server: 'd.example.com',
+        port: 443,
+        secret: const {'uuid': 'b831381d-6324-4d53-ad4f-8cda48b30811'},
+        tls: const TlsOptions(
+          enabled: true,
+          serverName: 'www.apple.com',
+          fingerprint: 'unsafe',
+          realityPublicKey: 'Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw',
+          realityShortId: '6ba85179e30d4fc2',
+        ),
+      );
+      final b = buildWith([d], d);
+      final j = jsonDecode(b.json) as Map<String, dynamic>;
+      final o = outboundOf(j, d.id, b.nodeTags);
+      final tls = o['tls'] as Map;
+      final utls = tls['utls'] as Map;
+      expect(utls['fingerprint'], 'chrome');
+    });
+
+    test('真实 sing-box check：混合合法/非法指纹的配置全部通过', () async {
+      final hasBin = File(singBoxBin).existsSync();
+      if (!hasBin) return; // 与上方 check 测试同一跳过条件
+      final dirtyVless = dirty(fp: 'unsafe', name: 'DirtyVless');
+      final dirtyReality = dirty(fp: 'unsafe', name: 'DirtyReality').copyWith(
+        tls: const TlsOptions(
+          enabled: true,
+          serverName: 'www.apple.com',
+          fingerprint: 'unsafe',
+          realityPublicKey: 'Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw',
+          realityShortId: '6ba85179e30d4fc2',
+        ),
+      );
+      final good = dirty(fp: 'safari', name: 'Good');
+      final b = ConfigBuilder.build(
+        nodes: [...nodes, dirtyVless, dirtyReality, good],
+        selected: nodes[1],
+        settings: const EngineSettings(),
+        clashSecret: 'x',
+      );
+      final dir = await Directory.systemTemp.createTemp('pp');
+      final f = File('${dir.path}/c.json');
+      await f.writeAsString(b.json);
+      final r = await Process.run(singBoxBin, ['check', '-c', f.path]);
+      await dir.delete(recursive: true);
+      expect(r.exitCode, 0, reason: '${r.stdout}\n${r.stderr}');
+    });
+  });
+
   group('规则命中', () {
     const s = EngineSettings(
       routeMode: RouteMode.rule,

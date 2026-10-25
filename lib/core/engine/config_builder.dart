@@ -331,22 +331,23 @@ class ConfigBuilder {
         n.protocol == ProxyProtocol.hysteria2 ||
         n.protocol == ProxyProtocol.tuic;
     if (needsTls) {
+      // 纵深防御：库中旧数据或手输节点可能含 sing-box 不认识的指纹
+      // （如其他客户端约定的 'unsafe'），原样写入会使整份配置初始化失败。
+      final fp = sanitizeUtlsFingerprint(n.tls.fingerprint);
       o['tls'] = {
         'enabled': true,
         'server_name': (n.tls.serverName?.isNotEmpty ?? false)
             ? n.tls.serverName
             : n.server,
         if (n.tls.alpn.isNotEmpty) 'alpn': n.tls.alpn,
-        if (n.tls.fingerprint != null && n.tls.fingerprint!.isNotEmpty)
-          'utls': {'enabled': true, 'fingerprint': n.tls.fingerprint},
+        if (fp != null) 'utls': {'enabled': true, 'fingerprint': fp},
         if (n.tls.isReality) ...{
           'reality': {
             'enabled': true,
             'public_key': n.tls.realityPublicKey,
             'short_id': n.tls.realityShortId ?? '',
           },
-          if (n.tls.fingerprint == null || n.tls.fingerprint!.isEmpty)
-            'utls': {'enabled': true, 'fingerprint': 'chrome'},
+          if (fp == null) 'utls': {'enabled': true, 'fingerprint': 'chrome'},
         },
       };
     }

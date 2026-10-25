@@ -57,6 +57,7 @@ class SettingsState {
     this.abuseIpDbKey = '',
     this.cloudflareTarget = 'https://www.cloudflare.com/cdn-cgi/trace',
     this.claudeTarget = 'https://api.anthropic.com/v1/messages',
+    this.testProfile = TestProfile.standard,
   });
   final EngineSettings engine;
   final int retentionDays;
@@ -64,18 +65,23 @@ class SettingsState {
   final String cloudflareTarget;
   final String claudeTarget;
 
+  /// 节点延迟检测档位（并发/超时，见 TestProfile）。
+  final TestProfile testProfile;
+
   SettingsState copyWith({
     EngineSettings? engine,
     int? retentionDays,
     String? abuseIpDbKey,
     String? cloudflareTarget,
     String? claudeTarget,
+    TestProfile? testProfile,
   }) => SettingsState(
     engine: engine ?? this.engine,
     retentionDays: retentionDays ?? this.retentionDays,
     abuseIpDbKey: abuseIpDbKey ?? this.abuseIpDbKey,
     cloudflareTarget: cloudflareTarget ?? this.cloudflareTarget,
     claudeTarget: claudeTarget ?? this.claudeTarget,
+    testProfile: testProfile ?? this.testProfile,
   );
 }
 
@@ -106,7 +112,14 @@ class SettingsNotifier extends Notifier<SettingsState> {
       abuseIpDbKey: key,
       cloudflareTarget: cf ?? state.cloudflareTarget,
       claudeTarget: claude ?? state.claudeTarget,
+      testProfile: TestProfile.fromName(await db.getKv('testProfile')),
     );
+    // 检测档位可能已持久化为非默认值：同步给节点检测调度器。
+    if (ref.mounted) {
+      ref
+          .read(nodesProvider.notifier)
+          .setTestProfile(state.testProfile);
+    }
     await db.pruneProbes(Duration(days: ret));
   }
 
@@ -134,6 +147,14 @@ class SettingsNotifier extends Notifier<SettingsState> {
     if (claude != null) {
       state = state.copyWith(claudeTarget: claude);
       await _db.setKv('claudeTarget', claude);
+    }
+  }
+
+  Future<void> setTestProfile(TestProfile p) async {
+    state = state.copyWith(testProfile: p);
+    await _db.setKv('testProfile', p.name);
+    if (ref.mounted) {
+      ref.read(nodesProvider.notifier).setTestProfile(p);
     }
   }
 }
@@ -208,7 +229,19 @@ class NodesNotifier extends Notifier<NodesState> {
     onChange: (m) {
       if (ref.mounted) state = state.copyWith(latency: m);
     },
+    // 检测档位决定并发上限（快速 16 / 标准 8 / 精确 4）。
+    // 持久化值经 SettingsNotifier._load 完成后由 setTestProfile 同步。
+    concurrency: ref.read(settingsProvider).testProfile.concurrency,
   );
+
+  /// 单次探测超时（秒），随检测档位变化。
+  int _probeTimeoutSec = TestProfile.standard.timeoutSec;
+
+  /// 运行时切换检测档位：并发上限立即生效，超时对后续探测生效。
+  void setTestProfile(TestProfile p) {
+    _latency.concurrency = p.concurrency;
+    _probeTimeoutSec = p.timeoutSec;
+  }
 
   @override
   NodesState build() {
@@ -248,7 +281,7 @@ class NodesNotifier extends Notifier<NodesState> {
   Future<ValidationResult> save(ProxyNode n) async {
     final r = NodeValidator.validate(n);
     if (!r.ok) return r;
-    await _db.upsertNode(n);
+    await _db.upsertNode(healUtlsFingerprint(n));
     await reload();
     return r;
   }
@@ -260,18 +293,20 @@ class NodesNotifier extends Notifier<NodesState> {
 
   Future<void> duplicate(ProxyNode n) async {
     await _db.upsertNode(
-      n.copyWith(
-        id: newId(),
-        name: '${n.name} 副本',
-        source: NodeSource.manual,
-        subscriptionId: '',
+      healUtlsFingerprint(
+        n.copyWith(
+          id: newId(),
+          name: '${n.name} 副本',
+          source: NodeSource.manual,
+          subscriptionId: '',
+        ),
       ),
     );
     await reload();
   }
 
   Future<void> toggle(ProxyNode n) async {
-    await _db.upsertNode(n.copyWith(enabled: !n.enabled));
+    await _db.upsertNode(healUtlsFingerprint(n.copyWith(enabled: !n.enabled)));
     await reload();
   }
 
@@ -330,7 +365,9 @@ class NodesNotifier extends Notifier<NodesState> {
         dups++;
         continue;
       }
-      accepted.add(n);
+      // 入库自愈：外部订阅常见的 fp=unsafe 等约定值不在 sing-box 白名单，
+      // 原样入库会导致连接时整份配置初始化失败（见 models.dart 注释）。
+      accepted.add(healUtlsFingerprint(n));
     }
     if (subId == null) {
       for (final n in accepted) {
@@ -468,7 +505,10 @@ class NodesNotifier extends Notifier<NodesState> {
         return const ProbeOutcome.unsupported('不在当前运行配置中，重新连接后可检测');
       }
       try {
-        final ms = await vpn.clash!.delay(tag, timeoutMs: 5000);
+        final ms = await vpn.clash!.delay(
+          tag,
+          timeoutMs: _probeTimeoutSec * 1000,
+        );
         o = ProbeOutcome.ok(ms, LatencyLayer.proxy);
       } catch (e) {
         o = classifyProbeError(redact(describeError(e)), LatencyLayer.proxy);
@@ -478,7 +518,9 @@ class NodesNotifier extends Notifier<NodesState> {
         '${n.protocol.label} 基于 UDP/QUIC，无法用 TCP 探测；连接 VPN 后可经内核检测',
       );
     } else {
-      final probes = NetworkProbes(timeout: const Duration(seconds: 5));
+      final probes = NetworkProbes(
+        timeout: Duration(seconds: _probeTimeoutSec),
+      );
       try {
         final ms = await probes.tcpPing(n.server, n.port);
         o = ProbeOutcome.ok(ms, LatencyLayer.tcp);

@@ -113,7 +113,10 @@ class LatencyScheduler {
 
   final LatencyProbe probe;
   final void Function(Map<String, LatencyEntry> entries) onChange;
-  final int concurrency;
+
+  /// 并发上限。运行时可改（检测档位：快速 16 / 标准 8 / 精确 4），
+  /// 改动在下一轮 worker 调度时生效。
+  int concurrency;
   final Duration stagger;
   final Duration autoCooldown;
 

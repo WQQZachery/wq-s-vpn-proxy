@@ -1,5 +1,80 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import 'proxy_node.dart';
+
 export 'proxy_node.dart';
+
+/// sing-box 1.14.3 支持的 uTLS 指纹白名单。
+/// 来源：sing-box 源码 common/tls/utls_client.go（case 分支穷举）。
+/// 其他客户端的约定值（如 v2rayN 的 `fp=unsafe` 表示跳过证书校验）不在此列，
+/// 原样写入会导致 sing-box 配置初始化失败：`unknown uTLS fingerprint: xxx`，
+/// 且该失败会让整份配置（含全部节点）校验不过——表现为换任何节点都无法连接。
+const kValidUtlsFingerprints = <String>{
+  'chrome',
+  'chrome_psk',
+  'chrome_psk_shuffle',
+  'chrome_padding_psk_shuffle',
+  'chrome_pq',
+  'chrome_pq_psk',
+  'firefox',
+  'edge',
+  'safari',
+  '360',
+  'qq',
+  'ios',
+  'android',
+  'random',
+  'randomized',
+};
+
+/// 将任意来源的 fingerprint 规整为 sing-box 可接受的值；
+/// 非法值（含空串）返回 null（由调用方回退默认 chrome 或不写 utls）。
+String? sanitizeUtlsFingerprint(String? fp) {
+  if (fp == null) return null;
+  final v = fp.trim().toLowerCase();
+  if (v.isEmpty) return null;
+  return kValidUtlsFingerprints.contains(v) ? v : null;
+}
+
+/// 返回 fingerprint 已净化的节点副本；无需变化时返回原对象（省一次拷贝）。
+/// 用于入库自愈：旧数据可能含 sing-box 不认识的指纹（如其他客户端的 'unsafe'）。
+ProxyNode healUtlsFingerprint(ProxyNode n) {
+  final fixed = sanitizeUtlsFingerprint(n.tls.fingerprint);
+  if (fixed == n.tls.fingerprint) return n;
+  return n.copyWith(
+    tls: TlsOptions(
+      enabled: n.tls.enabled,
+      serverName: n.tls.serverName,
+      insecure: n.tls.insecure,
+      alpn: n.tls.alpn,
+      fingerprint: fixed,
+      realityPublicKey: n.tls.realityPublicKey,
+      realityShortId: n.tls.realityShortId,
+    ),
+  );
+}
+
+/// 批量测速档位。参考 V2RayN / NekoBox 等客户端的实践：
+/// 快速档用高并发 + 短超时做批量初筛；精确档用低并发 + 多次连接取中位数。
+/// rounds 仅作用于 TCP 探测；VPN 运行时经核心的真实代理延迟测试不受档位影响。
+/// 节点延迟检测档位。并发与超时作用于 LatencyScheduler / 分层探测：
+/// VPN 运行时经 Clash API 做真实代理延迟；否则 TCP（+TLS 握手）。
+enum TestProfile {
+  quick('快速', 16, 3, '高并发短超时，数秒完成全量初筛'),
+  standard('标准', 8, 5, '并发与超时均衡（默认）'),
+  accurate('精确', 4, 8, '低并发长超时，弱网环境下结论更稳');
+
+  const TestProfile(this.label, this.concurrency, this.timeoutSec, this.description);
+
+  final String label;
+  final int concurrency;
+  final int timeoutSec;
+  final String description;
+
+  static TestProfile fromName(String? name) => TestProfile.values.firstWhere(
+    (p) => p.name == name,
+    orElse: () => TestProfile.standard,
+  );
+}
 
 /// 订阅。URL 本身视为敏感数据（常含 token），存安全存储，SQLite 只存 id/名称/统计。
 class Subscription {
