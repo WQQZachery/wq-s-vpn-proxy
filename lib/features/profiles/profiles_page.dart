@@ -12,6 +12,7 @@ import '../../app/state.dart';
 import '../../app/theme.dart';
 import '../../core/engine/latency_tester.dart';
 import '../../core/models/models.dart';
+import '../../core/networking/share_link_serializer.dart';
 import 'node_editor.dart';
 
 enum NodeFilter { all, enabled, healthy, failed, untested }
@@ -279,6 +280,8 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
         await n.duplicate(node);
       case 'toggle':
         await n.toggle(node);
+      case 'export':
+        await _exportNodes(context, [node]);
       case 'del':
         final ok = await showDialog<bool>(
           context: context,
@@ -299,6 +302,55 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
         );
         if (ok == true) await n.delete(node.id);
     }
+  }
+
+  /// R2：导出节点。内容含凭据，复制前必须经过隐私确认。
+  Future<void> _exportNodes(BuildContext context, List<ProxyNode> nodes) async {
+    if (nodes.isEmpty) return;
+    final single = nodes.length == 1;
+    final fmt = await showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: Text(single ? '导出「${nodes.first.name}」' : '导出 ${nodes.length} 个节点'),
+        content: const Text(
+          '导出的链接包含服务器地址、UUID/密码和 REALITY 参数等完整凭据，'
+          '任何拿到它的人都能使用该节点。请只发给可信的人，不要贴到公开场合。\n\n'
+          '内容会复制到系统剪贴板，部分输入法或应用可以读取剪贴板，用完建议清空。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('取消'),
+          ),
+          if (!single)
+            TextButton(
+              onPressed: () => Navigator.pop(c, 'sub'),
+              child: const Text('复制为订阅(Base64)'),
+            ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, 'links'),
+            child: const Text('复制分享链接'),
+          ),
+        ],
+      ),
+    );
+    if (fmt == null) return;
+    final r = fmt == 'sub'
+        ? ShareLinkSerializer.toSubscription(nodes)
+        : ShareLinkSerializer.toLines(nodes);
+    final exported = nodes.length - r.skipped.length;
+    if (exported > 0) await Clipboard.setData(ClipboardData(text: r.text));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          exported == 0
+              ? '没有可导出的节点（HTTP 代理没有通用分享链接格式）'
+              : '已复制 $exported 个节点'
+                    '${r.skipped.isEmpty ? '' : '，跳过 ${r.skipped.length} 个 HTTP 节点'}',
+        ),
+      ),
+    );
   }
 
   void _addMenu(BuildContext context) {
@@ -325,6 +377,19 @@ class _ProfilesPageState extends ConsumerState<ProfilesPage> {
               onTap: () {
                 Navigator.pop(c);
                 _importDialog(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.ios_share_rounded),
+              title: const Text('导出节点'),
+              subtitle: const Text('导出当前列表中显示的节点（含凭据）'),
+              onTap: () {
+                Navigator.pop(c);
+                final st = ref.read(nodesProvider);
+                _exportNodes(
+                  context,
+                  st.nodes.where((x) => _match(x, st)).toList(),
+                );
               },
             ),
             ListTile(
@@ -863,6 +928,8 @@ class _NodeRow extends StatelessWidget {
                           node.subscriptionId == null)
                         const PopupMenuItem(value: 'edit', child: Text('编辑')),
                       const PopupMenuItem(value: 'dup', child: Text('复制为手动节点')),
+                      if (ShareLinkSerializer.canExport(node))
+                        const PopupMenuItem(value: 'export', child: Text('导出分享链接')),
                       PopupMenuItem(
                         value: 'toggle',
                         child: Text(node.enabled ? '禁用' : '启用'),

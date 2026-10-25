@@ -376,7 +376,7 @@ class NodesNotifier extends Notifier<NodesState> {
     _log('更新订阅「${s.name}」：${redactUrl(s.url)}');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
-      ..userAgent = 'WQsProxyVPN/1.1.0 (sing-box 1.14)';
+      ..userAgent = 'WQsProxyVPN/1.1.1 (sing-box 1.14)';
     try {
       final req = await client
           .getUrl(Uri.parse(s.url))
@@ -669,8 +669,12 @@ class VpnController extends Notifier<VpnStatus> {
     } on ConfigBuildException catch (e) {
       return e.message;
     }
-    final err = await engine.checkConfig(built.json);
-    if (err != null) {
+    for (final w in built.warnings) {
+      _log('配置提示：$w');
+    }
+    final raw = await engine.checkConfig(built.json);
+    if (raw != null) {
+      final err = built.annotateError(raw);
       _log('配置校验失败：$err');
       return '配置校验失败：${redact(err)}';
     }
@@ -685,8 +689,9 @@ class VpnController extends Notifier<VpnStatus> {
     try {
       await engine.start(config: built.json, profileName: sel.name);
     } catch (e) {
-      state = VpnStatus(state: VpnState.error, message: '$e');
-      return '启动失败：$e';
+      final err = built.annotateError('$e');
+      state = VpnStatus(state: VpnState.error, message: redact(err));
+      return '启动失败：${redact(err)}';
     }
     return null;
   }

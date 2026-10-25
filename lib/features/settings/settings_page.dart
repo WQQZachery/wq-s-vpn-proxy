@@ -8,8 +8,8 @@ import '../../app/theme.dart';
 import '../../core/models/models.dart';
 import '../../core/security/redact.dart';
 
-/// 必须与 pubspec.yaml 的 version 一致（当前 1.1.0+2）
-const appVersion = '1.1.0';
+/// 必须与 pubspec.yaml 的 version 一致（当前 1.1.1+3）
+const appVersion = '1.1.1';
 const appBrandName = "WQ's Proxy VPN";
 
 class SettingsPage extends ConsumerWidget {

@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import '../models/models.dart';
 import 'node_validator.dart';
+import 'utls_fingerprint.dart';
 
 class EngineSettings {
   const EngineSettings({
@@ -93,8 +94,26 @@ class ConfigBuildException implements Exception {
 }
 
 class BuiltConfig {
-  BuiltConfig(this.json, this.nodeTags, this.selectedTag, this.warnings);
+  BuiltConfig(
+    this.json,
+    this.nodeTags,
+    this.selectedTag,
+    this.warnings, [
+    this.outboundLabels = const [],
+  ]);
   final String json;
+
+  /// outbounds 数组下标 → 可读名称（节点名或内置出站），用于把内核报错
+  /// “initialize outbound[N]: …” 定位到具体节点，而不是假设是所选节点。
+  final List<String> outboundLabels;
+
+  String annotateError(String err) =>
+      err.replaceAllMapped(RegExp(r'outbound\[(\d+)\]'), (m) {
+        final i = int.parse(m.group(1)!);
+        return i < outboundLabels.length
+            ? '${m.group(0)}（${outboundLabels[i]}）'
+            : m.group(0)!;
+      });
 
   /// 节点 id → 出站 tag
   final Map<String, String> nodeTags;
@@ -124,6 +143,10 @@ class ConfigBuilder {
     if (!sr.ok) throw ConfigBuildException('所选节点未通过校验：${sr.errors.join('；')}');
     if (!valid.any((n) => n.id == selected.id)) valid.insert(0, selected);
     warnings.addAll(sr.warnings);
+    for (final n in valid) {
+      final msg = resolveUtlsFingerprint(n.tls.fingerprint).message;
+      if (msg != null && n.id != selected.id) warnings.add('节点「${n.name}」：$msg');
+    }
 
     final tags = <String, String>{};
     final used = <String>{proxyTag, directTag, 'dns-out'};
@@ -178,6 +201,11 @@ class ConfigBuilder {
       tags,
       tags[selected.id]!,
       warnings,
+      [
+        '节点选择器',
+        for (final n in valid) '节点「${n.name}」',
+        '直连',
+      ],
     );
   }
 
@@ -331,23 +359,26 @@ class ConfigBuilder {
         n.protocol == ProxyProtocol.hysteria2 ||
         n.protocol == ProxyProtocol.tuic;
     if (needsTls) {
+      final fp = resolveUtlsFingerprint(n.tls.fingerprint);
       o['tls'] = {
         'enabled': true,
         'server_name': (n.tls.serverName?.isNotEmpty ?? false)
             ? n.tls.serverName
             : n.server,
         if (n.tls.alpn.isNotEmpty) 'alpn': n.tls.alpn,
-        if (n.tls.fingerprint != null && n.tls.fingerprint!.isNotEmpty)
-          'utls': {'enabled': true, 'fingerprint': n.tls.fingerprint},
-        if (n.tls.isReality) ...{
+        // 指纹在这里做最后一道规范化：无论来自分享链接、订阅、JSON、手动编辑
+        // 还是历史数据库，非法值都不会进入最终配置。
+        if (fp.value != null)
+          'utls': {'enabled': true, 'fingerprint': fp.value}
+        else if (n.tls.isReality)
+          // REALITY 依赖 uTLS；未设置/不支持时使用 sing-box 的默认指纹 chrome。
+          'utls': {'enabled': true, 'fingerprint': 'chrome'},
+        if (n.tls.isReality)
           'reality': {
             'enabled': true,
             'public_key': n.tls.realityPublicKey,
             'short_id': n.tls.realityShortId ?? '',
           },
-          if (n.tls.fingerprint == null || n.tls.fingerprint!.isEmpty)
-            'utls': {'enabled': true, 'fingerprint': 'chrome'},
-        },
       };
     }
     final t = n.transport;

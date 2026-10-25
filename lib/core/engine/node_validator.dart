@@ -2,6 +2,7 @@
 // 节点校验：任何导入内容在入库或交给核心前都必须通过这里。
 
 import '../models/models.dart';
+import 'utls_fingerprint.dart';
 
 class ValidationResult {
   const ValidationResult(this.errors, this.warnings);
@@ -64,6 +65,14 @@ class NodeValidator {
     if (n.port < 1 || n.port > 65535) e.add('端口超出范围：${n.port}');
     if (n.tls.insecure) {
       e.add('该节点要求跳过 TLS 证书校验（insecure/allowInsecure），出于安全原因不允许运行');
+    }
+    final needsTls =
+        n.tls.enabled ||
+        n.protocol == ProxyProtocol.hysteria2 ||
+        n.protocol == ProxyProtocol.tuic;
+    if (needsTls) {
+      final fpMsg = resolveUtlsFingerprint(n.tls.fingerprint).message;
+      if (fpMsg != null) w.add(fpMsg);
     }
     if (!transports.contains(n.transport.type))
       e.add('不支持的传输：${n.transport.type}');
