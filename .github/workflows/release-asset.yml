@@ -1,0 +1,24 @@
+name: Attach APK to release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: v1.1.0
+      file:
+        description: APK file name on apk branch
+        required: true
+        default: WQs-Proxy-VPN-1.1.0-arm64-v8a.apk
+permissions:
+  contents: write
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK from apk branch
+        run: curl -fsSL -o "${{ inputs.file }}" "https://github.com/${{ github.repository }}/raw/refs/heads/apk/${{ inputs.file }}" && sha256sum "${{ inputs.file }}"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" "${{ inputs.file }}" --clobber -R "${{ github.repository }}"
