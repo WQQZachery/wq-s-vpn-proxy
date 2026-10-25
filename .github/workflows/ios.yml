@@ -80,7 +80,12 @@ jobs:
 
       - name: Verify Xcode project
         run: |
-          pip install pbxproj==4.3.3
+          # macOS runner 上 pip 与 python3 可能不是同一解释器，或遇 PEP 668；
+          # 统一用 python3 -m pip 并带降级路径，装完立即验证可导入
+          python3 -m pip install pbxproj==4.3.3 \
+            || python3 -m pip install --break-system-packages pbxproj==4.3.3 \
+            || pip3 install --user pbxproj==4.3.3
+          python3 -c "import pbxproj; print('pbxproj', pbxproj.__version__ if hasattr(pbxproj, '__version__') else 'imported')"
           python3 scripts/ios/verify-project.py
 
       - name: Build iOS (no codesign)
@@ -91,7 +96,8 @@ jobs:
           APP="build/ios/Release-iphoneos/Runner.app"
           ls -d "$APP"
           ls "$APP/PlugIns/PacketTunnelProvider.appex"
-          ls -d "$APP/Frameworks/Libbox.xcframework"
+          # xcframework 经 Embed Frameworks 嵌入的是按平台解析出的 .framework slice
+          ls -d "$APP/Frameworks/Libbox.framework"
 
       - name: Package unsigned IPA
         run: |
