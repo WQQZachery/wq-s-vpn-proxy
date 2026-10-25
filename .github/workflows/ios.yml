@@ -1,0 +1,112 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: 保留位（当前仅产出未签名 IPA）
+        required: false
+        default: "no"
+  push:
+    branches: [feature/ios-port, main]
+    paths:
+      - "ios/**"
+      - "lib/**"
+      - "pubspec.yaml"
+      - "pubspec.lock"
+      - "scripts/ios/**"
+      - "scripts/build-libbox-ios.sh"
+      - ".github/workflows/ios.yml"
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  SINGBOX_VERSION: "1.14.3"
+  FLUTTER_VERSION: "3.47.8"
+  # 与 sing-box v1.14.3 go.mod 声明一致；gomobile@v0.1.13 官方组合
+  GO_VERSION: "1.25.5"
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Clone sing-box ${{ env.SINGBOX_VERSION }}
+        run: |
+          git clone --depth 1 --branch "v${{ env.SINGBOX_VERSION }}" \
+            https://github.com/SagerNet/sing-box.git "$RUNNER_TEMP/sing-box-src"
+
+      - name: Build Libbox.xcframework
+        env:
+          SINGBOX_SRC: ${{ runner.temp }}/sing-box-src
+        run: |
+          chmod +x scripts/build-libbox-ios.sh
+          scripts/build-libbox-ios.sh
+          test -d ios/Libbox.xcframework
+
+      - name: Verify Swift API against generated header
+        run: |
+          HEADER=$(find ios/Libbox.xcframework -name "Libbox.objc.h" -path "*ios-arm64/*" | head -1)
+          test -n "$HEADER"
+          python3 scripts/ios/verify-swift-api.py "$HEADER"
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: Verify Xcode project
+        run: |
+          pip install pbxproj==4.3.3
+          python3 scripts/ios/verify-project.py
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Check embedded extension and framework
+        run: |
+          APP="build/ios/Release-iphoneos/Runner.app"
+          ls -d "$APP"
+          ls "$APP/PlugIns/PacketTunnelProvider.appex"
+          ls -d "$APP/Frameworks/Libbox.xcframework"
+
+      - name: Package unsigned IPA
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          IPA="WQs-Proxy-VPN-${VERSION}-unsigned.ipa"
+          mkdir -p Payload
+          cp -R "build/ios/Release-iphoneos/Runner.app" Payload/
+          zip -q -r "$IPA" Payload
+          rm -rf Payload
+          sha256sum "$IPA"
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WQs-Proxy-VPN-unsigned-ipa
+          path: ${{ env.IPA }}
+          if-no-files-found: error
+
+      - name: Attach IPA to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" "${{ env.IPA }}" \
+            --clobber -R "${{ github.repository }}"
